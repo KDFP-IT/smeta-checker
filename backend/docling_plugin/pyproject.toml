@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "docling-kdfp"
 version = "0.1.0"
 description = "Docling table adapter for the smeta-checker physical PDF extraction runtime"
-requires-python = "==3.14.*"
-dependencies = ["docling==2.149.0", "docling-core==2.106.0"]
+requires-python = ">=3.10"
+dependencies = ["docling>=2.130,<3.0", "docling-core>=2.103.0"]
 
 [project.entry-points.docling]
 kdfp = "docling_kdfp"

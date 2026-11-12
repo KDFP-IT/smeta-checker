@@ -1,21 +1,78 @@
 """Docling engine adapter; physical extraction remains in smeta-checker's core."""
 from contextlib import contextmanager
+from functools import lru_cache
 import json
+import os
 from pathlib import Path
 import shutil
 from tempfile import NamedTemporaryFile
-from typing import Literal
+from typing import ClassVar, Literal
 
+import pymupdf
 from docling.datamodel.base_models import Cluster, LayoutPrediction, Table, TableStructurePrediction
-from docling.datamodel.pipeline_options import BaseTableStructureOptions
+from docling.datamodel.accelerator_options import AcceleratorOptions
+from docling.datamodel.pipeline_options import BaseTableStructureOptions, TableFormerMode, TableStructureOptions
 from docling.models.base_table_model import BaseTableStructureModel
+from docling.models.stages.table_structure.table_structure_model import TableStructureModel
 from docling_core.types.doc import BoundingBox, CoordOrigin, DocItemLabel
 
-from pdf_table_export import evidence_document, prepare_pages, source_identity, table_data, visible_box
+from pdf_table_export import evidence_document, prepare_table_pages, source_identity, table_data, visible_box
+
+
+def _table_clusters(page):
+    layout = page.predictions.layout
+    return [cluster for cluster in (layout.clusters if layout else [])
+            if cluster.label == DocItemLabel.TABLE]
+
+
+def _has_native_text(page, pdf_page, cluster):
+    box = cluster.bbox
+    height = page.size.height if page.size is not None else pdf_page.rect.height
+    if getattr(box, "coord_origin", None) == CoordOrigin.BOTTOMLEFT:
+        rect = (box.l, height - box.b, box.r, height - box.t)
+    else:
+        rect = (box.l, box.t, box.r, box.b)
+    clip = pymupdf.Rect(rect)
+    return any(
+        pymupdf.Rect(word[:4]).intersects(clip) and any(ch.isalpha() for ch in word[4])
+        for word in pdf_page.get_text("words")
+    )
+
+
+def _split_pages(path, pages):
+    """Native tables go to TableFormer; raster tables go to KDFP."""
+    native, raster = [], []
+    seen = set()
+    with pymupdf.open(path) as document:
+        for page in pages:
+            if page.page_no in seen:
+                continue
+            seen.add(page.page_no)
+            clusters = _table_clusters(page)
+            if not clusters:
+                continue
+            pdf_page = document[page.page_no - 1]
+            if all(_has_native_text(page, pdf_page, cluster) for cluster in clusters):
+                native.append(page)
+            else:
+                raster.append(page)
+    return raster, native
+
+
+@lru_cache(maxsize=1)
+def _tableformer():
+    base = Path(os.environ.get("DOCLING_SERVE_ARTIFACTS_PATH", "/models"))
+    artifacts = base / "docling-project--docling-models" / "model_artifacts" / "tableformer"
+    return TableStructureModel(
+        enabled=True,
+        artifacts_path=artifacts,
+        options=TableStructureOptions(mode=TableFormerMode.ACCURATE, do_cell_matching=True),
+        accelerator_options=AcceleratorOptions(),
+    )
 
 
 class KdfpTableOptions(BaseTableStructureOptions):
-    kind: Literal["kdfp"] = "kdfp"
+    kind: ClassVar[Literal["kdfp"]] = "kdfp"
     cache_dir: str = ".audit_cache/table-extraction"
 
 
@@ -60,9 +117,13 @@ class KdfpTableStructureModel(BaseTableStructureModel):
         with _original_pdf(conv_res, directory) as path:
             source = source_identity(path)
             source["filename"] = conv_res.input.file.name
-            records = list(prepare_pages(path, [page.page_no for page in pages], cache_dir=directory))
-        predictions = []
-        for page, record in zip(pages, records, strict=True):
+            targets, native_pages = _split_pages(path, pages)
+            records = (list(prepare_table_pages(path, [int(page.page_no) for page in targets], cache_dir=directory))
+                       if targets else [])
+        by_page = {record["page"]: record for record in records}
+        predictions = {}
+        for page in targets:
+            record = by_page[page.page_no]
             # The standard Docling table schema cannot hold independent OCR proofs.
             # Keep the full canonical evidence alongside its normal extraction cache.
             destination = directory/source["sha256"]/"evidence"/f"page-{page.page_no:05d}.json"
@@ -70,8 +131,10 @@ class KdfpTableStructureModel(BaseTableStructureModel):
             temporary = destination.with_suffix(".json.tmp")
             temporary.write_text(json.dumps(evidence_document([record], source), ensure_ascii=False), encoding="utf-8")
             temporary.replace(destination)
-            if record["errors"]:
-                raise RuntimeError(f"KDFP page {page.page_no} preparation failed: {record['errors']}")
+            fatal = [error for error in record["errors"]
+                     if error != "incomplete_cell_observation"]
+            if fatal:
+                raise RuntimeError(f"KDFP page {page.page_no} preparation failed: {fatal}")
             geometry = record["geometry"]
             if page.size is None or abs(page.size.width-geometry["width"]) > .1 or abs(
                     page.size.height-geometry["height"]) > .1:
@@ -98,8 +161,13 @@ class KdfpTableStructureModel(BaseTableStructureModel):
                 next_id += 1
             layout.clusters = clusters
             page.predictions.layout = layout
-            predictions.append(prediction)
-        return predictions
+            predictions[page.page_no] = prediction
+        if native_pages:
+            tableformer = _tableformer()
+            for page, prediction in zip(
+                    native_pages, tableformer.predict_tables(conv_res, native_pages), strict=True):
+                predictions[page.page_no] = prediction
+        return [predictions.get(page.page_no, TableStructurePrediction()) for page in pages]
 
 
 def table_structure_engines():

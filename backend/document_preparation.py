@@ -1,5 +1,6 @@
 """Full, resumable document preparation barrier before any paid position task."""
 
+import os
 from contextlib import closing, nullcontext
 from copy import deepcopy
 from typing import Any
@@ -43,6 +44,49 @@ def _resume_contract_issues(blobs,state,expected):
         if any(not geometry.get(str(p))for p in range(len(index.texts))):
             issues.append('snapshot_page_geometry_missing')
     return issues
+
+
+def _restart_document(config,history,name,state,reasons,expected,digest):
+    """Record why saved CPU state cannot resume, then start that document over."""
+    if state:
+        entry=dict(document_name=name,reason='saved_preparation_contract_changed',reasons=reasons,
+            previous_state=deepcopy(state),required_contract=deepcopy(expected),
+            previous_normative_corpus=deepcopy((config.get('normative_corpora')or{}).get(state.get('version_id'))))
+        entry['id']=digest(entry)
+        if not any(old.get('id')==entry['id']for old in history):
+            history.append(entry)
+    return dict(version=VERSION,version_id=expected['version_id'],pages=[])
+
+
+def _docling_batch_pages(pages,start,end):
+    """Assert one converted batch spans the requested pages without gaps."""
+    numbers=[page["page"]for page in pages]
+    if numbers==list(range(start,end+1)):
+        return pages
+    if start>1 and numbers==list(range(1,len(pages)+1)) and len(pages)==end-start+1:
+        # docling-serve numbers a sliced document from one; lift the batch onto
+        # absolute PDF pages so concatenated batches remain one document.
+        offset=start-1
+        for page in pages:
+            page["page"]+=offset
+            for table in page["tables"]:
+                table["page"]+=offset
+            for index,locator in enumerate(page["locators"]):
+                locator["page"]+=offset
+                locator["source_id"]=f"docling:{locator['page']}:{index}"
+        return pages
+    raise ValueError("Docling batch returned missing pages")
+
+
+def _tracing_attributes(tracing, name):
+    """Session attributes that keep preparation spans in the run's trace tree."""
+    if tracing is None or tracing.client is None:
+        return nullcontext()
+    from langfuse import propagate_attributes  # pyright: ignore[reportMissingImports]
+
+    return propagate_attributes(
+        session_id=tracing.session_id, trace_name=name, tags=["document-preparation"]
+    )
 
 
 def _yield_unfinished_cells(index):
@@ -108,7 +152,7 @@ def prepare_documents(
 ):
     import pymupdf
     from pdf_text import PDFTextSource
-    from analysis_replay import enabled,replay_prepared,prepared_identity,prepared_inputs,store_prepared,digest
+    from analysis_replay import enabled,replay_prepared,prepared_identity,prepared_inputs,store_prepared,digest,extraction_engine
 
     record = context.repository.load_run(run_id, include_results=False)
     config = record.get("config") or {}
@@ -116,14 +160,17 @@ def prepare_documents(
     history=deepcopy(config.get('preparation_history')or[])
 
     def restart(name,state,reasons,expected):
-        if state:
-            entry=dict(document_name=name,reason='saved_preparation_contract_changed',reasons=reasons,
-                previous_state=deepcopy(state),required_contract=deepcopy(expected),
-                previous_normative_corpus=deepcopy((config.get('normative_corpora')or{}).get(state.get('version_id'))))
-            entry['id']=digest(entry)
-            if not any(old.get('id')==entry['id']for old in history):
-                history.append(entry)
-        return dict(version=VERSION,version_id=expected['version_id'],pages=[])
+        return _restart_document(config,history,name,state,reasons,expected,digest)
+    engine = extraction_engine(config)
+    if engine == "docling":
+        return _prepare_documents_docling(
+            context, run_id, pdf_files, pdf_versions,
+            checkpoint=checkpoint, cancelled=cancelled, tracing=tracing, record=record,
+            config=config, documents=documents, history=history,
+            snapshot_enabled=enabled(context), replay_prepared=replay_prepared,
+            prepared_identity=prepared_identity, prepared_inputs=prepared_inputs,
+            store_prepared=store_prepared, digest=digest,
+        )
     snapshots = {}
     reused_documents = []
     total = 0
@@ -248,16 +295,8 @@ def prepare_documents(
                     if cancelled():
                         return None
                     checkpoint()
-                    attributes = nullcontext()
+                    attributes = _tracing_attributes(tracing, "prepare-pdf-page")
                     client = tracing.client if tracing else None
-                    if client is not None:
-                        from langfuse import propagate_attributes
-
-                        attributes = propagate_attributes(
-                            session_id=tracing.session_id,
-                            trace_name="prepare-pdf-page",
-                            tags=["document-preparation"],
-                        )
                     with (
                         attributes,
                         span(
@@ -301,6 +340,193 @@ def prepare_documents(
             "documents_prepared": True,
             "prepared_documents":documents,
             "preparation_reused_documents":reused_documents,
+            "normative_corpora": {
+                str(pdf_versions[name].id): ref for name, ref in snapshots.items()
+            },
+        },
+    )
+    return snapshots
+
+
+def _prepare_documents_docling(
+    context, run_id, pdf_files, pdf_versions, *, checkpoint, cancelled, tracing,
+    record, config, documents, history, snapshot_enabled, replay_prepared,
+    prepared_identity, prepared_inputs, store_prepared, digest,
+):
+    """Prepare every PDF through docling-serve before dispatching positions.
+
+    The service returns layout, OCR and table structure as one finished
+    document, so every legacy per-cell repair pass is skipped by design.
+    Pages are converted in batches and committed page by page: a yielded
+    slice resumes at the first page not yet stored.
+    """
+    import pymupdf
+
+    from docling_client import convert_pages
+    from docling_source import docling_pages
+
+    def expected_contract(name):
+        return prepared_inputs(pdf_files[name], pdf_versions[name].id, engine="docling")
+
+    def restart(name, state, reasons, expected):
+        return _restart_document(config, history, name, state, reasons, expected, digest)
+
+    snapshots: dict[str, Any] = {}
+    reused_documents: list[str] = []
+    total = 0
+    for name in pdf_files:
+        checkpoint()
+        if cancelled():
+            return None
+        state: dict[str, Any] = dict(documents.get(name) or {})
+        expected = expected_contract(name)
+        reasons = _resume_contract_issues(context.blob_store, state, expected)
+        if reasons:
+            state = restart(name, state, reasons, expected)
+        elif not state:
+            state = dict(version=VERSION, version_id=expected["version_id"], pages=[])
+        if snapshot_enabled and not state.get("snapshot"):
+            ident = prepared_identity(record, pdf_files[name], pdf_versions[name].id, engine="docling")
+            cached = replay_prepared(context, ident)
+            if cached:
+                candidate = dict(cached["state"], reused_artifact=digest(ident))
+                reasons = _resume_contract_issues(context.blob_store, candidate, expected)
+                if reasons:
+                    state = restart(name, candidate, ["reusable_artifact_contract_changed", *reasons], expected)
+                else:
+                    state = candidate
+                    reused_documents.append(name)
+        if not state.get("page_count"):
+            with pymupdf.open(stream=bytes(pdf_files[name]), filetype="pdf") as doc:
+                state["page_count"] = len(doc)
+        documents[name] = state
+        total += int(state["page_count"])
+    context.repository.update_run_config(
+        run_id,
+        {
+            "prepared_documents": documents,
+            "preparation_history": history,
+            "document_preparation_version": VERSION,
+            "documents_prepared": False,
+            "extraction_engine": "docling",
+            "pdf_preparation": dict(
+                done=sum(len(s.get("pages") or []) for s in documents.values()),
+                total=total,
+            ),
+        },
+    )
+    batch = max(1, int(os.environ.get("DOCLING_SERVE_PAGE_BATCH", "8")))
+    for name in pdf_files:
+        checkpoint()
+        if cancelled():
+            return None
+        version = str(pdf_versions[name].id)
+        expected = expected_contract(name)
+        state = dict(documents.get(name) or {})
+        if state.get("version_id") != version or state.get("version") != VERSION:
+            state = dict(version=VERSION, version_id=version, pages=[])
+        if state.get("snapshot"):
+            index = load_snapshot(context.blob_store, state["snapshot"])
+            if (
+                index.pending_ocr
+                or index.metadata.get("preparation_version") != VERSION
+                or not index.metadata.get("preparation_complete")
+                or index.metadata.get("document_version_id") != version
+            ):
+                raise ValueError("Document snapshot is not fully prepared")
+            if snapshot_enabled:
+                state = store_prepared(
+                    context,
+                    prepared_identity(record, pdf_files[name], version, engine="docling"),
+                    state,
+                )
+                documents[name] = state
+            snapshots[name] = state["snapshot"]
+            continue
+        page_count = int(state["page_count"])
+        pages = list(state.get("pages") or [])
+        if len(pages) > page_count:
+            pages = []
+        state = dict(state, pages=pages)
+
+        def commit(current, name=name):
+            documents[name] = dict(current, pages=list(current["pages"]))
+            done = sum(len(s.get("pages") or []) for s in documents.values())
+            context.repository.update_run_config(
+                run_id,
+                {
+                    "prepared_documents": documents,
+                    "document_preparation_version": VERSION,
+                    "pdf_preparation": dict(done=done, total=total),
+                },
+            )
+
+        commit(state)
+        start = len(pages) + 1
+        while start <= page_count:
+            if cancelled():
+                return None
+            checkpoint()
+            end = min(start + batch - 1, page_count)
+            attributes = _tracing_attributes(tracing, "docling-convert")
+            client = tracing.client if tracing else None
+            with (
+                attributes,
+                span(
+                    "docling-convert",
+                    client=client,
+                    input=dict(pdf=name, pages=[start, end]),
+                ) as observation,
+            ):
+                raw = convert_pages(
+                    bytes(pdf_files[name]), filename=name, page_range=(start, end)
+                )
+                batch_pages = _docling_batch_pages(docling_pages(raw, sort_by_position=True), start, end)
+                observation.update(
+                    output=dict(
+                        pages=len(batch_pages),
+                        chars=sum(len(page["text"]) for page in batch_pages),
+                        tables=sum(len(page["tables"]) for page in batch_pages),
+                    ),
+                    level="WARNING" if any(page["errors"] for page in batch_pages) else "DEFAULT",
+                )
+            pages.extend(store_json(context.blob_store, page) for page in batch_pages)
+            commit(state)
+            start = end + 1
+        packed = [load_json(context.blob_store, ref) for ref in pages]
+        if len(packed) != page_count:
+            raise ValueError("Docling batch returned missing pages")
+        native = dict(
+            texts=[page["text"] for page in packed],
+            pdf_sha256=expected["pdf_sha256"],
+            extraction_key=expected["extraction_key"],
+            ocr_settings_key=expected["ocr_settings_key"],
+            table_key=expected["table_key"],
+            document_version_id=version,
+            ocr=dict(engine="docling", preset="rapidocr", table_mode="fast"),
+        )
+        state["native"] = store_json(context.blob_store, native)
+        index = assemble_document(native, packed)
+        state["snapshot"] = store_snapshot(context.blob_store, index)
+        state["failed_pages"] = list(index.metadata["failed_pages"])
+        # Persist the finished snapshot before any artifact bookkeeping so a
+        # yielded or failed slice resumes from one immutable document.
+        commit(state)
+        if snapshot_enabled:
+            state = store_prepared(
+                context,
+                prepared_identity(record, pdf_files[name], version, engine="docling"),
+                dict(state, pages=list(pages)),
+            )
+            commit(state)
+        snapshots[name] = state["snapshot"]
+    context.repository.update_run_config(
+        run_id,
+        {
+            "documents_prepared": True,
+            "prepared_documents": documents,
+            "preparation_reused_documents": reused_documents,
+            "extraction_engine": "docling",
             "normative_corpora": {
                 str(pdf_versions[name].id): ref for name, ref in snapshots.items()
             },

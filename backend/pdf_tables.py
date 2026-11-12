@@ -369,7 +369,7 @@ def _native_tables_unrotated(page, read_cell, *, clip=None, recover=True):
             header = table.header
             external = header.external
             known_header = any(header.names)
-        except AttributeError, ReferenceError:
+        except (AttributeError, ReferenceError):
             external, known_header = False, False
         header_rows = 0
         if known_header and not external:

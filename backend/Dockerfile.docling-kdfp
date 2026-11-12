@@ -1,0 +1,44 @@
+# docling-serve + smeta-checker KDFP table-structure plugin.
+# Base keeps the official Docling runtime and model cache; the plugin adds our
+# OpenCV grid + RapidOCR table extraction as a Docling table-structure model.
+FROM ghcr.io/docling-project/docling-serve-cpu:v1.35.0
+
+USER root
+RUN dnf install -y \
+        mesa-libGL \
+        glib2 \
+        libgomp \
+        tesseract \
+        tesseract-langpack-rus \
+        tesseract-langpack-eng \
+    && dnf clean all
+
+RUN pip install --no-cache-dir --upgrade \
+        "docling-serve==1.38.2" \
+        "docling==2.150.0"
+
+RUN pip install --no-cache-dir \
+        "pymupdf" \
+        "pymupdf-layout" \
+        "pymupdf4llm" \
+        "rapidocr" \
+        "rapid-table" \
+        "onnxruntime" \
+        "opencv-python" \
+        "pillow" \
+        "billiard"
+
+COPY . /srv/smeta
+RUN pip install --no-cache-dir --no-deps /srv/smeta/docling_plugin
+
+ENV PYTHONPATH=/srv/smeta \
+    DOCLING_SERVE_ARTIFACTS_PATH=/models \
+    DOCLING_DEVICE=cpu \
+    DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS=true \
+    TESSDATA_PREFIX=/usr/share/tesseract/tessdata
+
+USER 1001
+WORKDIR /srv/smeta
+EXPOSE 5001
+ENTRYPOINT []
+CMD ["docling-serve", "run", "--host", "0.0.0.0", "--port", "5001"]

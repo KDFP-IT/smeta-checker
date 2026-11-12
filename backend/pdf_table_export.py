@@ -65,8 +65,8 @@ def prepare_pages(path, pages, *, cache_dir):
 
     path = Path(path)
     with pymupdf.open(path) as document:
-        pages = tuple(pages) if pages is not None else tuple(range(1, len(document)+1))
-        if not pages or len(set(pages)) != len(pages) or any(
+        pages = tuple(dict.fromkeys(pages)) if pages is not None else tuple(range(1, len(document)+1))
+        if not pages or any(
                 type(p) is not int or not 1 <= p <= len(document) for p in pages):
             raise ValueError("Pages must be unique original PDF page numbers")
         with closing(PDFTextSource(document, cache_dir=cache_dir,
@@ -76,6 +76,60 @@ def prepare_pages(path, pages, *, cache_dir):
                 record["outside_table_text"] = outside_table_text(document[number-1], record)
                 yield record
 
+
+def prepare_table_pages(path, pages, *, cache_dir):
+    """Table-only preparation: OpenCV grid + RapidOCR, no full-page Tesseract.
+
+    Results are cached per PDF bytes + page + table algorithm version, so a
+    retry or a second run does not re-render the same raster grid.
+    """
+    import hashlib
+    import pymupdf
+    from pdf_tables import RULED_OCR_VERSION, VERSION as TABLE_VERSION, prepare_ruled_page
+
+    path = Path(path)
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    cache_root = Path(cache_dir) / digest / "table-pages"
+    cache_key = {"export": VERSION, "tables": TABLE_VERSION, "ocr": RULED_OCR_VERSION}
+    with pymupdf.open(path) as document:
+        pages = tuple(dict.fromkeys(pages)) if pages is not None else tuple(range(1, len(document)+1))
+        if not pages or any(
+                type(p) is not int or not 1 <= p <= len(document) for p in pages):
+            raise ValueError("Pages must be unique original PDF page numbers")
+        for number in pages:
+            page = document[number - 1]
+            geometry = dict(width=page.rect.width, height=page.rect.height,
+                            matrix=list(page.rotation_matrix))
+            cached = cache_root / f"page-{number:05d}.json"
+            record = None
+            if cached.exists():
+                try:
+                    payload = json.loads(cached.read_text(encoding="utf-8"))
+                    if payload.get("key") == cache_key and payload.get("page") == number:
+                        record = payload.get("record")
+                except (OSError, ValueError):
+                    record = None
+            if not isinstance(record, dict):
+                try:
+                    record = prepare_ruled_page(page, rotation=0, timeout=120.0,
+                                                cache_dir=cache_dir) or {}
+                except Exception as exc:
+                    record = dict(tables=[], errors=[f"table_extraction_failed:{type(exc).__name__}"],
+                                  quality={"state": "failed", "origin": "ocr", "engine": "rapidocr"})
+                record = dict(record)
+                record.setdefault("tables", [])
+                record.setdefault("errors", [])
+                record.setdefault("quality", {"state": "uncertain", "origin": "ocr", "engine": "rapidocr"})
+                cache_root.mkdir(parents=True, exist_ok=True)
+                cached.write_text(json.dumps({"key": cache_key, "page": number, "record": record},
+                                             ensure_ascii=False), encoding="utf-8")
+            record = dict(record)
+            record["page"] = number
+            record["geometry"] = geometry
+            record["locators"] = []
+            record["table_rows"] = []
+            yield record
 
 def source_identity(path):
     path = Path(path)

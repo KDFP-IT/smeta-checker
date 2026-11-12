@@ -733,7 +733,7 @@ class PDFTextSource:
             return None
         try:
             envelope = json.loads(raw.decode("utf-8"))
-        except UnicodeDecodeError, ValueError:
+        except (UnicodeDecodeError, ValueError):
             return None
         if not isinstance(envelope, dict):
             return None
@@ -853,7 +853,7 @@ class PDFTextSource:
             return None
         try:
             envelope = json.loads(raw.decode("utf-8"))
-        except UnicodeDecodeError, ValueError:
+        except (UnicodeDecodeError, ValueError):
             return None
         if not isinstance(envelope, dict):
             return None
@@ -896,7 +896,7 @@ class PDFTextSource:
             envelope = json.loads(self._ruled_tables_path(idx).read_bytes().decode("utf-8"))
         except OSError:
             return None
-        except UnicodeDecodeError, ValueError:
+        except (UnicodeDecodeError, ValueError):
             return None
         if (not isinstance(envelope, dict) or envelope.get("schema") != CACHE_SCHEMA_VERSION
                 or envelope.get("page") != idx or envelope.get("pdf_sha256") != self._pdf_hash
@@ -1310,7 +1310,7 @@ class PDFTextSource:
             return None
         try:
             envelope = json.loads(raw.decode("utf-8"))
-        except UnicodeDecodeError, ValueError:
+        except (UnicodeDecodeError, ValueError):
             return None
         if not isinstance(envelope, dict):
             return None

@@ -261,6 +261,64 @@ services:
     command: ["celery", "-A", "audit_tasks:worker", "worker", "-Q", "normative", "-c", "${AUDIT_NORMATIVE_CONCURRENCY:-2}", "--loglevel=INFO", "--max-memory-per-child", "750000", "--max-tasks-per-child", "25", "-n", "normative-worker@%h", "--pidfile", "/tmp/celery-normative.pid"]
     healthcheck:
       test: ["CMD-SHELL", "kill -0 $(cat /tmp/celery-normative.pid)"]
+
+  docling-models:
+    image: ghcr.io/docling-project/docling-serve-cpu:v1.35.0
+    user: "0:0"
+    restart: "no"
+    volumes:
+      - docling-models:/models
+    command:
+      - sh
+      - -c
+      - >-
+        docling-tools models download rapidocr
+        --rapidocr-backend-lang onnxruntime:cyrillic -o /models &&
+        docling-tools models download-hf-repo -o /models
+        docling-project/docling-layout-heron docling-project/docling-models &&
+        chown -R 1001:0 /models
+
+  docling:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.docling-kdfp
+    image: smeta-checker-docling-kdfp:latest
+    restart: unless-stopped
+    depends_on:
+      docling-models:
+        condition: service_completed_successfully
+    expose:
+      - "5001"
+    environment:
+      DOCLING_DEVICE: cpu
+      DOCLING_NUM_THREADS: "4"
+      DOCLING_SERVE_ENG_KIND: local
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "2"
+      DOCLING_SERVE_ENG_LOC_SHARE_MODELS: "true"
+      DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "1"
+      DOCLING_SERVE_ARTIFACTS_PATH: /models
+      DOCLING_SERVE_ENABLE_UI: "0"
+      DOCLING_SERVE_ENABLE_API_DOCS: "0"
+      DOCLING_SERVE_MAX_NUM_PAGES: "200"
+      DOCLING_SERVE_MAX_FILE_SIZE: "104857600"
+      DOCLING_SERVE_MAX_SYNC_WAIT: "600"
+      DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS: "true"
+      DOCLING_SERVE_DEFAULT_TABLE_STRUCTURE_KIND: kdfp
+      DOCLING_SERVE_ALLOWED_TABLE_STRUCTURE_KINDS: kdfp,docling_tableformer
+      DOCLING_SERVE_CUSTOM_TABLE_STRUCTURE_PRESETS: '{"kdfp":{"kind":"kdfp","cache_dir":"/tmp/table-extraction"}}'
+      DOCLING_SERVE_DEFAULT_TABLE_STRUCTURE_PRESET: kdfp
+      DOCLING_SERVE_ALLOWED_TABLE_STRUCTURE_PRESETS: kdfp,tableformer_v1_fast,tableformer_v1_accurate
+    volumes:
+      - docling-models:/models
+    mem_limit: 3g
+    cpus: "4"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+
   worker-llm:
     build:
       context: ./backend
@@ -382,3 +440,4 @@ volumes:
   blobs:
   pdfcache:
   normcache:
+  docling-models:
