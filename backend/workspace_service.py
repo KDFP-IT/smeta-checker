@@ -9,9 +9,6 @@ from html import escape
 from uuid import UUID
 from typing import Any, Literal
 
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
-
 from audit_models import VorPosition
 from workspace_models import ResultDTO, RunDTO
 
@@ -445,6 +442,9 @@ def validated_word_report(context, record):
 
 
 def sheet_window(data: bytes, position: VorPosition):
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
     sheet = position.position_source.sheet if position.position_source else ""
     source_row = position.position_source.row if position.position_source else None
     if not sheet or source_row is None:

@@ -138,21 +138,51 @@ def _to_attr(value):
         return str(value)
 
 
+def _to_attr_as_json(value):
+    """OpenInference ``input.value``/``output.value`` carry JSON text."""
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            return str(value)
+    return value if isinstance(value, str) else str(value)
+
+
+# OpenInference span kinds shown by Phoenix; everything else is a CHAIN stage.
+LLM_SPAN_NAMES = frozenset({
+    "generate-audit",
+    "normative-query-plan",
+    "normative-rank",
+    "normative-position-check",
+})
+
+
+def _span_kind(name):
+    return "LLM" if name in LLM_SPAN_NAMES else "CHAIN"
+
+
 def _kwargs_to_attrs(name, kwargs):
     kwargs = _describe(name, dict(kwargs))
-    attrs = {}
+    attrs = {"openinference.span.kind": _span_kind(name)}
     for key in ("input", "output"):
         if key in kwargs:
             value = kwargs.pop(key)
             if _redact.get() or _mask.get():
                 value = _maybe_redact(name, key, value)
             attrs[key] = _to_attr(value)
+            attrs[f"{key}.value"] = _to_attr_as_json(value)
+            attrs[f"{key}.mime_type"] = "application/json"
     metadata = kwargs.pop("metadata", None)
     if isinstance(metadata, dict):
         for key, value in metadata.items():
             attrs[f"metadata.{key}"] = _to_attr(value)
     for key, value in kwargs.items():
         attrs[key] = _to_attr(value)
+    model = kwargs.get("model") or (
+        metadata.get("model") if isinstance(metadata, dict) else None
+    )
+    if model and name in LLM_SPAN_NAMES:
+        attrs["llm.model_name"] = _to_attr(model)
     return attrs
 
 
@@ -160,6 +190,29 @@ class Observation:
     def __init__(self, span=None, name=""):
         self.span = span
         self.name = name
+        self.ok = None
+        self.closed = False
+
+    def fail(self):
+        self.ok = False
+
+    def close(self):
+        """Set OK/ERROR on the finished stage; safe for non-OTel spans."""
+        if self.closed:
+            return
+        self.closed = True
+        if self.span is None:
+            return
+        set_status = getattr(self.span, "set_status", None)
+        if not callable(set_status):
+            return
+        try:
+            if self.ok is False:
+                set_status(trace.Status(trace.StatusCode.ERROR))
+            else:
+                set_status(trace.Status(trace.StatusCode.OK))
+        except Exception:
+            _logger.warning("Phoenix observation status failed", exc_info=True)
 
     def update(self, **kwargs):
         if self.span is None:
@@ -190,11 +243,15 @@ def _ensure_provider(endpoint, project, environment):
         return _PROVIDERS[key]
     resource = Resource.create({
         "service.name": project or "smeta-checker",
+        "openinference.project.name": project or "smeta-checker",
         "deployment.environment": environment or "production",
     })
     provider = TracerProvider(resource=resource)
     try:
-        exporter = OTLPSpanExporter(endpoint=endpoint.rstrip("/") + "/v1/traces")
+        exporter = OTLPSpanExporter(
+            endpoint=endpoint.rstrip("/") + "/v1/traces",
+            headers={"x-project-name": project} if project else None,
+        )
         provider.add_span_processor(BatchSpanProcessor(exporter))
     except Exception as exc:
         _logger.warning("Phoenix exporter init failed: %s", type(exc).__name__, exc_info=True)
@@ -261,6 +318,8 @@ def span(name, *, client=None, trace_context=None, **kwargs):
     try:
         yield observation
     except BaseException:
+        observation.fail()
+        observation.close()
         if manager is not None:
             try:
                 manager.__exit__(*sys.exc_info())
@@ -268,6 +327,7 @@ def span(name, *, client=None, trace_context=None, **kwargs):
                 _logger.warning("Phoenix span close failed", exc_info=True)
         raise
     else:
+        observation.close()
         if manager is not None:
             try:
                 manager.__exit__(None, None, None)
@@ -377,7 +437,13 @@ class PositionTrace:
                 with trace.use_span(self.root, end_on_exit=False):
                     with tracer.start_as_current_span(name, attributes=attrs) as otel_span:
                         obs = Observation(otel_span, name)
-                        yield obs
+                        try:
+                            yield obs
+                        except BaseException:
+                            obs.fail()
+                            raise
+                        finally:
+                            obs.close()
         finally:
             _mask.reset(mask_token)
             _redact.reset(redact_token)
