@@ -156,7 +156,11 @@ def run_graph_position(*, context: Any, run_id: UUID, position_index: int,
         trace = tracing.position(input={"position_index": position_index}, metadata={"position_index": position_index})
         stats: dict[str, Any] = {"requests": 0, "usage": {}, "responses": [], "warnings": []}
         config = record.get("config", {}) or {}
-        selected = config.get("selected_indices") or [position_index]
+        selected = (
+            config.get("selected_indices")
+            or config.get("position_inputs")
+            or [position_index]
+        )
         run_cap = int(config.get("max_http_attempts", 6 * len(selected)))
         position_cap = int(config.get("max_position_attempts", 6))
         client = (context.client_factory or __import__("openai").OpenAI)(

@@ -443,7 +443,7 @@ def validated_word_report(context, record):
 
 def sheet_window(data: bytes, position: VorPosition):
     from openpyxl import load_workbook
-    from openpyxl.utils import get_column_letter
+    from openpyxl.utils import column_index_from_string, get_column_letter
 
     sheet = position.position_source.sheet if position.position_source else ""
     source_row = position.position_source.row if position.position_source else None
@@ -452,15 +452,22 @@ def sheet_window(data: bytes, position: VorPosition):
     book = load_workbook(io.BytesIO(data), data_only=False, keep_links=False)
     try:
         sheet_obj = book[sheet]
-        low = high = source_row
-        # One reviewed row only. Identifiers and type remain internal metadata.
-        columns = list(range(1, 6))
-        merged = list(sheet_obj.merged_cells.ranges)
+        low = max(1, source_row - 3)
+        high = source_row + 3
         coords = (
             set((position.position_source.cells or {}).keys())
             if position.position_source
             else set()
         )
+        # Show the reviewed row with nearby context, including the type and
+        # note columns (A-K) used by the VOR workbook.
+        last_column = 11
+        for coordinate in coords:
+            letters = "".join(ch for ch in coordinate if ch.isalpha())
+            if letters:
+                last_column = max(last_column, column_index_from_string(letters))
+        columns = list(range(1, last_column + 1))
+        merged = list(sheet_obj.merged_cells.ranges)
         rows = []
         for number in range(low, high + 1):
             cells = []
@@ -475,7 +482,7 @@ def sheet_window(data: bytes, position: VorPosition):
                     ),
                     None,
                 )
-                if span and col != span.min_col:
+                if span and (col != span.min_col or number != span.min_row):
                     continue
                 if span:
                     cell = sheet_obj.cell(span.min_row, span.min_col)
@@ -486,7 +493,7 @@ def sheet_window(data: bytes, position: VorPosition):
                         "column_span": min(span.max_col, columns[-1]) - col + 1
                         if span
                         else 1,
-                        "row_span": 1,
+                        "row_span": min(span.max_row, high) - number + 1 if span else 1,
                         "highlight": cell.coordinate in coords and number == source_row,
                     }
                 )
@@ -740,13 +747,20 @@ def _cell_evidence_boxes(context, record, evidence, page_number, page, snapshot_
             handles = cell_source_handles(
                 version_id, page_number, table.get("table_id"), cell.get("cell_id")
             )
-            if source_id not in handles:
+            if source_id not in handles and source_id != str(cell.get("cell_id")):
                 continue
             bbox = cell.get("bbox") or []
             if len(bbox) != 4:
                 continue
             rect = pymupdf.Rect(bbox)
-            if rect.is_empty or rect.is_infinite or not page.cropbox.contains(rect):
+            if rect.is_empty or rect.is_infinite:
+                continue
+            # Docling cell boxes are already in the page's display frame.
+            # Convert back to the unrotated frame because source_evidence
+            # applies page.rotation_matrix to every returned rectangle.
+            if page.rotation:
+                rect = rect * page.derotation_matrix
+            if not page.cropbox.contains(rect):
                 continue
             return [rect]
     return []

@@ -834,14 +834,22 @@ def _formula_coefficient(position: dict[str, Any]):
 
 def _nearest_quantity_fact(context: GraphContext, position: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """Find a real table cell whose value rounds to the VOR amount."""
+    import re
     from decimal import Decimal, ROUND_HALF_UP
-    from pdf_cell_ocr import column_unit
+
     from normative_parameters import number
+    from normative_retrieval import terms
+    from pdf_cell_ocr import column_unit
 
     index = context.prepared_index
     declared = number(position.get("volume", ""))
     if index is None or declared is None:
         return None
+    sections = (position.get("position_source") or {}).get("sections") or []
+    scope_text = " ".join(
+        str(section.get("text", "")) for section in sections if isinstance(section, dict)
+    ).casefold()
+    wanted = terms(str(position.get("work_name", "")) + " " + str(position.get("comment", "")))
     best = None
     for page, tables in enumerate(getattr(index, "tables", None) or [], 1):
         for table in tables:
@@ -857,7 +865,35 @@ def _nearest_quantity_fact(context: GraphContext, position: dict[str, Any]) -> t
                     str(by_id[item].get("text", "")) for item in cell.get("header_ids", [])
                     if item in by_id
                 )
+                row_text = " ".join(
+                    str(item.get("text", "")) for item in cells
+                    if item.get("row") == cell.get("row")
+                ).casefold()
+                if "улиц" in scope_text and "съезд" in row_text and "улиц" not in row_text:
+                    continue
+                if "съезд" in scope_text and "улиц" in row_text and "съезд" not in row_text:
+                    continue
+                table_text = " ".join(
+                    str(item.get("text", "")) for item in cells
+                    if item.get("role") in {"header", "group"}
+                )
+                context_text = (table_text + " " + row_text).casefold()
+                total_row = "всего" in row_text or "итог" in row_text
+                if wanted and not (wanted & terms(context_text)) and not total_row:
+                    continue
                 unit = column_unit(table, cell)
+                unit_text = context_text
+                position_unit = str(position.get("unit", "")).casefold().replace("³", "3")
+                unit_patterns = {
+                    "т": r"(?<![а-яa-z])(?:т|тонн[а-я]*|t)(?![а-яa-z])",
+                    "м3": r"(?<![а-яa-z])(?:м3|m3)(?![а-яa-z0-9])",
+                    "м2": r"(?<![а-яa-z])(?:м2|m2)(?![а-яa-z0-9])",
+                    "м": r"(?<![а-яa-z])м(?![а-яa-z0-9])",
+                }
+                if position_unit in unit_patterns and not re.search(unit_patterns[position_unit], unit_text):
+                    continue
+                if position_unit == "м" and re.search(r"м\s*/\s*с", unit_text):
+                    continue
                 position_unit = str(position.get("unit", "")).casefold()
                 if unit and position_unit not in {unit.casefold(), "м3", "т"}:
                     continue
