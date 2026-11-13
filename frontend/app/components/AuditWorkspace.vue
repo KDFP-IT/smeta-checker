@@ -38,8 +38,14 @@ const searchPages = ref<number[]>([])
 const mobileTab = ref<'vor' | 'pdf'>('vor')
 const isNarrow = ref(false)
 const pdfPanel = ref<{ find: (query: string) => Promise<number[]> }>()
-const evidenceQuote = computed(() => workspace.value?.evidence[0]?.quote || '')
-const evidenceRegion = computed(() => workspace.value?.evidence[0]?.region || null)
+const focusedEvidence = computed(
+  () =>
+    workspace.value?.evidence.find((item) => (item.region?.highlights?.length || 0) > 0) ||
+    workspace.value?.evidence[0] ||
+    null,
+)
+const evidenceQuote = computed(() => focusedEvidence.value?.quote || '')
+const evidenceRegion = computed(() => focusedEvidence.value?.region || null)
 const dossierItems: SplitterItem[] = [
   { slot: 'pdf', minSize: 30, defaultSize: 62 },
   { slot: 'dossier', minSize: 25, defaultSize: 38 },
@@ -121,8 +127,11 @@ async function loadPosition() {
     const result = await backend.workspace(props.runId, props.positionIndex)
     if (!active || current !== positionEpoch) return
     workspace.value = result
-    version.value = result.evidence[0]?.version_id || pdfs.value[0]?.id || ''
-    page.value = result.evidence[0]?.page || 1
+    const focus =
+      result.evidence.find((item) => (item.region?.highlights?.length || 0) > 0) ||
+      result.evidence[0]
+    version.value = focus?.version_id || pdfs.value[0]?.id || ''
+    page.value = focus?.page || 1
   } catch (e) {
     if (active && current === positionEpoch) error.value = readableError(e)
   } finally {
