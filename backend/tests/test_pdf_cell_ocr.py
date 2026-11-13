@@ -151,3 +151,11 @@ def test_refinement_proof_survives_immutable_snapshot_roundtrip():
     assert restored.tables[0][0]['column_units']['0']['image_key']=='blob'
     assert old.to_snapshot()['corpus_id']==before
     assert restored.to_snapshot()['corpus_id']!=before
+
+
+def test_ocr_brace_superscript_is_a_literal_area_unit():
+    table=dict(table_id='t',row_count=2,col_count=1,origin='native',cells=[
+        dict(cell_id='h',role='header',row=0,column=0,colspan=1,text='Площадь,\nM{2',bbox=[0,0,100,20]),
+        dict(cell_id='c',role='cell',row=1,column=0,colspan=1,text='874,42',bbox=[0,20,100,40],header_ids=['h']),
+    ])
+    assert column_unit(table,table['cells'][1]) in {'м2','m2'}

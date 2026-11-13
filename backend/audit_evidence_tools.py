@@ -515,21 +515,21 @@ def prepared_quantity_candidates(tools: Any, position: Any, run_config: dict[str
         except Exception:
             pass
     # VOR work titles carry the operational layer thickness (12cm), while
-    # quantity schedules carry the full construction thickness (24cm).
-    # Filtering works by operational height drops the right schedule.
-    if position_type.casefold() != "работа":
-        try:
-            import re
+    # quantity schedules can carry the full construction thickness (24cm).
+    # Use the literal height as a ranking signal only: alternatives stay in
+    # the candidate set so a mismatch remains visible instead of being hidden.
+    try:
+        import re
 
-            match = re.search(r"h\s*=\s*(\d+(?:[.,]\d+)?)\s*(см|cm|м|m)\b", work, re.I)
-            if match:
-                value = match.group(1).replace(",", ".")
-                height_cm = value if match.group(2).lower() in {"см", "cm"} else str(float(value) * 100)
-        except Exception:
-            height_cm = None
+        match = re.search(r"h\s*=\s*(\d+(?:[.,]\d+)?)\s*(см|cm|м|m)\b", work, re.I)
+        if match:
+            value = match.group(1).replace(",", ".")
+            height_cm = value if match.group(2).lower() in {"см", "cm"} else str(float(value) * 100)
+    except Exception:
+        height_cm = None
     query = " ".join(part for part in query_parts if part)[:600]
     try:
-        result = method(query, unit=unit, height_cm=height_cm, section_context=section_context, limit=6)
+        result = method(query, unit=unit, height_cm=height_cm, section_context=section_context, limit=10)
     except Exception:
         return []
     picked = _pickup_symmetric_columns([dict(item) for item in result or []], tools, unit)
@@ -574,6 +574,87 @@ def prepared_quantity_candidates(tools: Any, position: Any, run_config: dict[str
     return area[:8]
 
 
+
+def prepared_area_candidates(tools: Any, position: Any) -> list[dict[str, Any]]:
+    """Find a PDD area equal to the literal area input of a VOR formula.
+
+    The formula's largest positive literal is the area base (e.g.
+    ``431,61*0,12*1,26``); it is not the output quantity. Only exact cells or
+    exact row sums are returned. The model still has to bind the candidate.
+    """
+    from decimal import Decimal
+    import re
+
+    from normative_parameters import number
+
+    formula = ""
+    if isinstance(position, dict):
+        formula = str((position.get("calculation") or {}).get("expression")
+                      or position.get("formula") or "")
+    else:
+        formula = str((getattr(position, "calculation", None) or {}).get("expression")
+                      or getattr(position, "formula", "") or "")
+    literals = [Decimal(item.replace(",", ".")) for item in re.findall(r"\d+(?:[.,]\d+)?", formula)]
+    if not literals:
+        return []
+    area = max(literals)
+    if area < 10:
+        return []
+    found: list[dict[str, Any]] = []
+    for page, tables in enumerate(getattr(tools.index, "tables", None) or [], 1):
+        for table in tables:
+            cells = table.get("cells") or []
+            totals = {
+                cell["row"] for cell in cells
+                if cell.get("role") == "body"
+                and (cell.get("text") or "").strip().casefold().rstrip(": ") in {"всего", "итог"}
+            }
+            for row in sorted(totals):
+                row_cells = [c for c in cells if c.get("row") == row and number(c.get("text")) is not None]
+                groups: list[list[dict[str, Any]]] = [[cell] for cell in row_cells]
+                groups += [[left, right] for i, left in enumerate(row_cells) for right in row_cells[i + 1:]]
+                for group in groups:
+                    values = [number(cell.get("text")) for cell in group]
+                    if any(value is None for value in values):
+                        continue
+                    total = sum(values, Decimal(0))
+                    if abs(total - area) > max(Decimal("0.02"), area * Decimal("0.0001")):
+                        continue
+                    columns = sorted({int(cell["column"]) for cell in group})
+                    headers = []
+                    for cell in group:
+                        for header in cells:
+                            if header.get("cell_id") in cell.get("header_ids", []) and header.get("text"):
+                                text = str(header["text"]).strip()
+                                if text and text not in headers:
+                                    headers.append(text)
+                    header_text = " ".join(headers)
+                    if not re.search(r"м\s*[²2]|m\s*2", header_text, re.I):
+                        continue
+                    candidate = {
+                        "page": page, "row": int(row), "columns": columns,
+                        "values": [str(cell.get("text")) for cell in group],
+                        "operation": "direct" if len(group) == 1 else "sum",
+                        "headers": headers, "score": 20, "unit": "м2",
+                        "unit_verified": True, "scope_verified": False,
+                        "table_id": table.get("table_id"), "role": "input:area",
+                    }
+                    try:
+                        result = tools.execute(EvidenceRequest(
+                            tool="read_table", page=page, table_id=table.get("table_id"),
+                            row_ids=[int(row)], column_ids=columns,
+                        ))
+                        candidate["operand_source_ids"] = [
+                            item["source_id"] for item in result.get("rows", [])
+                            if item.get("source_id") and item.get("cell_id") in {
+                                cell.get("cell_id") for cell in group
+                            }
+                        ]
+                    except Exception:
+                        candidate["operand_source_ids"] = []
+                    found.append(candidate)
+    return found[:5]
+
 __all__ = [
     "TOOL_STATE_VERSION",
     "EvidenceRequest",
@@ -583,6 +664,7 @@ __all__ = [
     "load_prepared_tools",
     "model_result",
     "model_source_aliases",
+    "prepared_area_candidates",
     "prepared_quantity_candidates",
     "restore_source_ids",
     "restore_tool_bundle",

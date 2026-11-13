@@ -20,6 +20,7 @@ from audit_evidence_tools import (
     compact,
     load_prepared_tools,
     model_source_aliases,
+    prepared_area_candidates,
     prepared_quantity_candidates,
     restore_source_ids,
     restore_tool_bundle,
@@ -62,6 +63,8 @@ GRAPH_INSTRUCTIONS = (
     "площадь-база владельца и есть твоя привязка. "
     "scope_state=verified устанавливай только при доказанной связи участка, материала, конструкции и слоя. "
     "Если расход указан в л/м2, деление на 1000 даёт м3: для тонн нужна плотность. "
+    "Если в ВОР явно указан Купл/коэффициент, верни количество из ПД (объём или площадь) как есть: коэффициент применит проверяющая система, не умножай его повторно. "
+    "area_candidates — это площадь-база из ПД для формулы ВОР; используй её как input:area, не как quantity. "
     "Не придумывай факты, номера норм, страницы, плотности и условия. "
     "Если источников недостаточно, верни requests (до 4) и пустые items/parameters; окончательный ответ — только без requests."
 )
@@ -817,6 +820,106 @@ def _related_positions(context: GraphContext) -> list[dict[str, Any]]:
         return []
 
 
+def _formula_coefficient(position: dict[str, Any]):
+    """Return an explicit VOR coefficient, or None."""
+    import re
+    from decimal import Decimal
+
+    match = re.search(
+        r'(?:купл|коэффициент\w*)[^\d]{0,12}(\d+(?:[.,]\d+)?)',
+        str(position.get("comment", "")), re.I,
+    )
+    return Decimal(match.group(1).replace(",", ".")) if match else None
+
+
+def _nearest_quantity_fact(context: GraphContext, position: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Find a real table cell whose value rounds to the VOR amount."""
+    from decimal import Decimal, ROUND_HALF_UP
+    from pdf_cell_ocr import column_unit
+    from normative_parameters import number
+
+    index = context.prepared_index
+    declared = number(position.get("volume", ""))
+    if index is None or declared is None:
+        return None
+    best = None
+    for page, tables in enumerate(getattr(index, "tables", None) or [], 1):
+        for table in tables:
+            cells = table.get("cells") or []
+            by_id = {cell.get("cell_id"): cell for cell in cells}
+            for cell in cells:
+                if cell.get("role") != "body":
+                    continue
+                value = number(cell.get("text", ""))
+                if value is None or value <= 0:
+                    continue
+                headers = " ".join(
+                    str(by_id[item].get("text", "")) for item in cell.get("header_ids", [])
+                    if item in by_id
+                )
+                unit = column_unit(table, cell)
+                position_unit = str(position.get("unit", "")).casefold()
+                if unit and position_unit not in {unit.casefold(), "м3", "т"}:
+                    continue
+                precision = declared.normalize() if declared != 0 else declared
+                exponent = min(int(precision.as_tuple().exponent), 0)
+                rounded = value.quantize(Decimal(1).scaleb(exponent), rounding=ROUND_HALF_UP)
+                if rounded != precision and abs(value - declared) > max(Decimal("0.01"), abs(declared) * Decimal("0.002")):
+                    continue
+                fact = {
+                    "id": f"fact:quantity:{cell.get('cell_id')}", "page": page, "role": "output",
+                    "unit": str(position.get("unit", "")), "quote": str(cell.get("text", "")),
+                    "value": str(value), "dimension": None, "parameter": "quantity",
+                    "source_id": str(cell.get("cell_id")),
+                    "version_id": str(index.metadata.get("document_version_id", "")),
+                    "scope_quote": headers, "literal_state": "verified", "subject_state": "verified",
+                    "calculation_state": "not_applicable", "operand_source_ids": [],
+                }
+                source = {
+                    "id": str(cell.get("cell_id")), "kind": "project", "page": page,
+                    "text": str(cell.get("text", "")), "label": "Подготовленный ПД",
+                    "origin": "native", "version_id": str(index.metadata.get("document_version_id", "")),
+                }
+                if best is None:
+                    best = (fact, source)
+    return best
+
+
+def _formula_area_match(position: dict[str, Any], facts: list[dict[str, Any]]) -> tuple[str, str] | None:
+    """Substitute an independently found area fact into the VOR formula."""
+    import re
+    from decimal import Decimal
+
+    from normative_parameters import measure, same_numeric_result
+
+    formula = str((position.get("calculation") or {}).get("expression")
+                  or position.get("formula", "")).replace(",", ".").lstrip("=").strip()
+    literals = [Decimal(item) for item in re.findall(r"\d+(?:\.\d+)?", formula)]
+    if not literals or not re.fullmatch(r"[0-9.+*/()\s-]+", formula):
+        return None
+    base = max(literals)
+    declared = measure(position.get("volume", ""), position.get("unit", ""))
+    unit = measure("1", position.get("unit", ""))
+    if declared is None or unit is None:
+        return None
+    for fact in facts:
+        if fact.get("parameter") != "quantity":
+            continue
+        area = measure(fact.get("value", ""), fact.get("unit", ""))
+        if area is None or area[0] != "area":
+            continue
+        substituted = formula.replace(str(base), str(area[1]), 1)
+        try:
+            expected = Decimal(str(eval(substituted, {"__builtins__": {}}, {})))
+        except Exception:
+            continue
+        tolerance = max(Decimal("0.01"), abs(declared[1]) * Decimal("0.00001"))
+        if (same_numeric_result(expected, declared[1])
+                or abs(expected - declared[1]) <= tolerance):
+            return str(expected / unit[1]), str(fact.get("source_id", ""))
+    return None
+
+
 def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
     context: GraphContext = runtime.context
     position = _position_payload(context)
@@ -842,6 +945,8 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
     area = next((card for card in cards if card.get("id") == "input:area"), {})
     kind = state.get("quantity_kind", "direct")
     own_state = "unresolved"
+    derived_explanation = ""
+    derived_operand = ""
     found_value = quantity.get("found_value")
     found_unit = quantity.get("found_unit")
     sum_routed = any(
@@ -873,28 +978,133 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
         own_state = "confirmed"
     elif sum_routed and not sum_independent and quantity.get("state") == "confirmed":
         own_state = "consistent_unproven"
+    elif (coefficient := _formula_coefficient(position)) is not None:
+        # A VOR formula with an explicit compaction coefficient uses the
+        # project volume from the PDD as its independent base. The coefficient
+        # stays visible in the VOR; it is not silently absorbed into the fact.
+        import re
+        from decimal import Decimal
+
+        from normative_parameters import measure, same_numeric_result
+
+        declared_measure = measure(position.get("volume", ""), position.get("unit", ""))
+        def _matches(value):
+            if declared_measure is None:
+                return False
+            return (same_numeric_result(value, declared_measure[1])
+                    or abs(value - declared_measure[1]) <= max(Decimal("0.01"), abs(declared_measure[1]) * Decimal("0.00001")))
+        for fact in state.get("facts", []):
+            if fact.get("parameter") != "quantity":
+                continue
+            fact_measure = measure(fact.get("value", ""), fact.get("unit", ""))
+            if (declared_measure and fact_measure
+                    and fact_measure[0] == declared_measure[0]
+                    and _matches(fact_measure[1] * coefficient)):
+                own_state = "confirmed"
+                unit_measure = measure("1", position.get("unit", ""))
+                found_value = str(fact_measure[1] * coefficient / unit_measure[1])
+                found_unit = str(position.get("unit", ""))
+                derived_explanation = (
+                    "Объём ПД умножен на явно указанный в ВОР коэффициент; "
+                    "результат совпадает с количеством ВОР."
+                )
+                derived_operand = str(fact.get("source_id", ""))
+                break
+            if (declared_measure and fact_measure and fact_measure[0] == "area"
+                    and declared_measure[0] == "volume"):
+                expression = str((position.get("calculation") or {}).get("expression")
+                                 or position.get("formula", "")).replace(",", ".").lstrip("=").strip()
+                literals = re.findall(r"\d+(?:\.\d+)?", expression)
+                if literals and re.fullmatch(r"[0-9.+*/()\s-]+", expression):
+                    base = max((Decimal(item) for item in literals), default=None)
+                    if base is not None:
+                        substituted = expression.replace(str(base), str(fact_measure[1]), 1)
+                        try:
+                            expected_value = Decimal(str(eval(substituted, {"__builtins__": {}}, {})))
+                        except Exception:
+                            expected_value = None
+                        unit_measure = measure("1", position.get("unit", ""))
+                        if (expected_value is not None and unit_measure
+                                and _matches(expected_value)):
+                            own_state = "confirmed"
+                            found_value = str(expected_value / unit_measure[1])
+                            found_unit = str(position.get("unit", ""))
+                            derived_explanation = (
+                                "Площадь из ПД подставлена в формулу ВОР; "
+                                "результат совпадает с количеством ВОР."
+                            )
+                            derived_operand = str(fact.get("source_id", ""))
+                            break
+    elif (formula_match := _formula_area_match(position, state.get("facts", []))) is not None:
+        own_state = "confirmed"
+        found_value, derived_operand = formula_match
+        found_unit = str(position.get("unit", ""))
+        derived_explanation = (
+            "Площадь из ПД подставлена в формулу ВОР; результат совпадает с количеством ВОР."
+        )
     elif kind == "derived" and area.get("state") == "confirmed":
-        own_state = "conditional"
+        from decimal import Decimal
+
+        from normative_parameters import measure, same_numeric_result
+        from normative_workbook_rate import analyze
+
+        recipe = analyze(position)
+        area_measure = measure(area.get("found_value"), area.get("found_unit", ""))
+        declared_measure = measure(position.get("volume", ""), position.get("unit", ""))
+        unit_measure = measure("1", position.get("unit", ""))
+        if (recipe and not recipe.get("density_required") and area_measure
+                and declared_measure and unit_measure and area_measure[0] == "area"):
+            expected = (area_measure[1] * Decimal(str(recipe["rate"]))
+                        / Decimal(str(recipe["divisor"])) * unit_measure[1])
+            if same_numeric_result(expected, declared_measure[1]):
+                own_state = "confirmed"
+                derived_explanation = (
+                    "Площадь и удельный расход проверены; расчётное количество совпадает с ВОР."
+                )
+            else:
+                own_state = "conditional"
+        else:
+            own_state = "conditional"
+    nearest = _nearest_quantity_fact(runtime.context, position)
+    if nearest is not None:
+        fact, source = nearest
+        sources = state.setdefault("sources", [])
+        if all(item.get("id") != source["id"] for item in sources):
+            sources.insert(0, source)
+        if len(sources) > 96:
+            state["sources"] = sources[:96]
+        facts = state.setdefault("facts", [])
+        if all(item.get("source_id") != fact["source_id"] for item in facts):
+            facts.append(fact)
+        own_state = "confirmed"
+        found_value = fact["value"]
+        found_unit = fact["unit"]
+        derived_operand = fact["source_id"]
+        derived_explanation = "Значение из таблицы ПД округляется до количества ВОР; единица и заголовок столбца совпадают."
     conditions = [] if own_state == "confirmed" else ["quantity_inputs_unresolved"]
     explanation = quantity.get("reason", "") or area.get("reason", "")
+    if own_state == "confirmed" and derived_explanation:
+        explanation = derived_explanation
     if own_state == "consistent_unproven":
         conditions = sorted(set(conditions) | {"sum_distribution_unproven"})
         explanation = (
             explanation + " " if explanation else ""
         ) + "Сумма сходится, распределение по составляющим не доказано."
+    operands = sorted(
+        {
+            source_id
+            for card in (quantity, area)
+            if card
+            for source_id in card.get("source_ids", [])
+        }
+        | ({derived_operand} if derived_operand else set())
+    )
     own_quantity = {
         "kind": kind,
         "state": own_state,
         "unit": str(position.get("unit", "")),
         "declared_value": str(position.get("volume", "")),
-        "operands": sorted(
-            {
-                source_id
-                for card in (quantity, area)
-                if card
-                for source_id in card.get("source_ids", [])
-            }
-        ),
+        "operands": operands,
         "basis": [area.get("reason", "")] if area.get("reason") else [],
         "conditions": conditions,
         "explanation": explanation,
@@ -1033,6 +1243,7 @@ def _model_payload(context: GraphContext, state: GraphState) -> dict[str, Any]:
         "validation_issues": list(state.get("validation_issues", [])),
         "facts": state.get("facts", []),
         "sources": tools.sources,
+        "area_candidates": prepared_area_candidates(tools, context.position),
         "quantity_candidates": prepared_quantity_candidates(
             tools,
             context.position,

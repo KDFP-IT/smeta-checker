@@ -210,6 +210,21 @@ def _table(
             cell["text"], header=cell["role"] == "header"
         )
     _merge_wrapped_cells(cells)
+    header_cells = [cell for cell in cells if cell["role"] == "header"]
+    for cell in cells:
+        if cell["role"] != "body":
+            continue
+        covering = [
+            header
+            for header in header_cells
+            if header["row"] < cell["row"]
+            and header["column"] <= cell["column"] < header["column"] + header["colspan"]
+        ]
+        if covering:
+            cell["header_ids"] = [
+                header["cell_id"]
+                for header in sorted(covering, key=lambda item: (item["row"], item["column"]))
+            ]
     row_count = _offset(data.get("num_rows"), 0)
     col_count = _offset(data.get("num_cols"), 0)
     for cell in cells:
@@ -333,10 +348,12 @@ def docling_pages(
             if text:
                 parts.append(text)
         entries = tables.get(page_no) or []
+        table_text = "\n".join(row for _, rows in entries for row in rows)
+        page_text = "\n".join([table_text, *parts]) if table_text else "\n".join(parts)
         prepared.append(
             {
                 "page": page_no,
-                "text": "\n".join(parts),
+                "text": page_text,
                 "table_rows": [row for _, rows in entries for row in rows],
                 "locators": locators,
                 "tables": [table for table, _ in entries],

@@ -1046,6 +1046,25 @@ class Repository(DepartmentRepositoryMixin):
                     })
             session.commit()
 
+    def own_dispatched_delivery(self, run_id: UUID, position_index: int) -> dict[str, Any] | None:
+        """Return this worker's already-dispatched audit delivery, if any.
+
+        ``reserve_deliveries`` can legitimately return another position's
+        delivery first. A concurrent caller must then recover its own row
+        instead of failing the position.
+        """
+        with Session(self._engine) as session:
+            rows = session.scalars(select(TaskOutbox).where(
+                TaskOutbox.run_id == run_id,
+                TaskOutbox.task_name == "audit_tasks.audit_position",
+                TaskOutbox.status == "dispatched",
+            )).all()
+            for row in rows:
+                if int((row.payload or {}).get("position_index", -1)) == int(position_index):
+                    return {"id": str(row.id), "token": str(row.delivery_token),
+                            "name": row.task_name, "payload": dict(row.payload or {})}
+        return None
+
     def reserve_deliveries(self, *, limit: int = 100) -> list[dict[str, Any]]:
         """Recover expired execution leases even when the worker hostname is alive."""
         deliveries = []
