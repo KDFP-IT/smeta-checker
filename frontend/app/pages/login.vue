@@ -45,37 +45,37 @@ onMounted(async () => {
           <h1 class="login-heading">Вход в систему</h1>
           <p v-if="checking" class="empty" role="status">Проверяем доступ…</p>
           <template v-else>
-            <p v-if="error" class="error-box" role="alert">{{ error }}</p>
             <form v-if="mode" class="login-form" @submit.prevent="login">
-              <UFormField
-                :label="corporate ? 'Корпоративная почта' : 'Логин'"
-                name="login"
-                required
-              >
+              <UFormField :label="corporate ? 'Корпоративная почта' : 'Логин'" name="login">
                 <UInput
                   v-model="loginName"
                   name="username"
+                  @update:model-value="error = ''"
                   :aria-label="corporate ? 'Корпоративная почта' : 'Логин'"
+                  :placeholder="corporate ? 'Введите корпоративную почту' : 'Введите ваш логин'"
                   :autocomplete="corporate ? 'email' : 'username'"
                   :leading-icon="corporate ? 'i-lucide-mail' : 'i-lucide-user'"
                   autocapitalize="none"
                   :spellcheck="false"
                   :disabled="busy"
                   autofocus
-                  required
+                  :color="error ? 'error' : 'primary'"
+                  :class="{ 'login-error-input': error }"
                   class="w-full"
                 />
               </UFormField>
-              <UFormField label="Пароль" name="password" required>
+              <UFormField label="Пароль" name="password">
                 <UInput
                   id="password"
                   v-model="password"
                   :type="showPassword ? 'text' : 'password'"
                   aria-label="Пароль"
+                  placeholder="Введите ваш пароль"
                   autocomplete="current-password"
                   leading-icon="i-lucide-lock"
                   :disabled="busy"
-                  required
+                  :color="error ? 'error' : 'primary'"
+                  :class="{ 'login-error-input': error }"
                   class="w-full"
                   :ui="{ trailing: 'pe-1' }"
                 >
@@ -150,6 +150,32 @@ onMounted(async () => {
   }
   .login-center {
     max-width: 100%;
+  }
+}
+
+.login-error-input {
+  animation: login-error-shake 360ms ease-in-out;
+}
+.login-error-input :deep(input) {
+  --tw-ring-color: var(--ui-error) !important;
+  border-color: var(--ui-error);
+}
+@keyframes login-error-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-4px);
+  }
+  40% {
+    transform: translateX(4px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(3px);
   }
 }
 </style>
