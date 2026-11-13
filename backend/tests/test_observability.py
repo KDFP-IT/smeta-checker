@@ -340,3 +340,13 @@ class MetricsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CacheCostTests(unittest.TestCase):
+    def test_cache_read_is_charged_at_cached_rate(self):
+        from audit_observability import estimate_cost
+
+        self.assertEqual(
+            estimate_cost({"input": 1000, "output": 1000, "cache_read": 400}, 2, 4, 1),
+            5.6,
+        )

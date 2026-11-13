@@ -163,7 +163,9 @@ def _span_kind(name):
 
 def _kwargs_to_attrs(name, kwargs):
     kwargs = _describe(name, dict(kwargs))
-    attrs = {"openinference.span.kind": _span_kind(name)}
+    span_kind = kwargs.pop("as_type", None)
+    kind_map = {"generation": "LLM", "guardrail": "GUARDRAIL", "tool": "TOOL"}
+    attrs = {"openinference.span.kind": kind_map.get(str(span_kind), _span_kind(name))}
     for key in ("input", "output"):
         if key in kwargs:
             value = kwargs.pop(key)
@@ -176,12 +178,36 @@ def _kwargs_to_attrs(name, kwargs):
     if isinstance(metadata, dict):
         for key, value in metadata.items():
             attrs[f"metadata.{key}"] = _to_attr(value)
+    usage = kwargs.pop("usage_details", None)
+    if isinstance(usage, dict):
+        token_map = {
+            "input": "llm.token_count.prompt",
+            "output": "llm.token_count.completion",
+            "total": "llm.token_count.total",
+            "reasoning": "llm.token_count.completion_details.reasoning",
+            "cache_read": "llm.token_count.prompt_details.cache_read",
+        }
+        for key, attr in token_map.items():
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                attrs[attr] = value
+    cost = kwargs.pop("cost", None)
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+        attrs["llm.cost.total"] = float(cost)
+    model_parameters = kwargs.pop("model_parameters", None)
+    if isinstance(model_parameters, dict):
+        attrs["llm.invocation_parameters"] = _to_attr_as_json(model_parameters)
+    provider = kwargs.pop("provider", None)
+    if not provider and isinstance(metadata, dict):
+        provider = metadata.get("provider")
+    if provider:
+        attrs["llm.provider"] = _to_attr(provider)
     for key, value in kwargs.items():
         attrs[key] = _to_attr(value)
     model = kwargs.get("model") or (
         metadata.get("model") if isinstance(metadata, dict) else None
     )
-    if model and name in LLM_SPAN_NAMES:
+    if model and (name in LLM_SPAN_NAMES or span_kind == "generation"):
         attrs["llm.model_name"] = _to_attr(model)
     return attrs
 
@@ -227,6 +253,9 @@ class Observation:
                 self.span.update(**redacted)
                 return
             attrs = _kwargs_to_attrs(self.name, kwargs)
+            # Updates carry usage/output; they must not reset the span kind
+            # that was set when the generation span started.
+            attrs.pop("openinference.span.kind", None)
             for key, value in attrs.items():
                 self.span.set_attribute(key, value)
         except Exception:
@@ -341,7 +370,8 @@ def span(name, *, client=None, trace_context=None, **kwargs):
 class TracingRun:
     def __init__(self, endpoint="", project="", environment="production",
                  audit_run_id="", request_id="", redact_pdf=False, mask_prompts=False,
-                 public_url="", flush_on_close=True):
+                 public_url="", flush_on_close=True, input_cost_per_1k=0.0,
+                 output_cost_per_1k=0.0, cache_read_cost_per_1k=0.0):
         self.audit_run_id = str(audit_run_id or "")
         self.request_id = str(request_id or "")
         self.session_id = (
@@ -350,6 +380,9 @@ class TracingRun:
         self.redact_pdf = bool(redact_pdf)
         self.mask_prompts = bool(mask_prompts)
         self.flush_on_close = bool(flush_on_close)
+        self.input_cost_per_1k = float(input_cost_per_1k or 0.0)
+        self.output_cost_per_1k = float(output_cost_per_1k or 0.0)
+        self.cache_read_cost_per_1k = float(cache_read_cost_per_1k or 0.0)
         self.environment = environment or "production"
         self.endpoint = (endpoint or os.environ.get("PHOENIX_COLLECTOR_ENDPOINT", "")).strip()
         self.project = (project or os.environ.get("PHOENIX_PROJECT_NAME", "smeta-checker")).strip()
@@ -450,6 +483,16 @@ class PositionTrace:
             _position.reset(position_token)
             _client.reset(token)
 
+    def cost(self, usage):
+        from audit_observability import estimate_cost
+
+        return estimate_cost(
+            usage,
+            self.run.input_cost_per_1k,
+            self.run.output_cost_per_1k,
+            self.run.cache_read_cost_per_1k,
+        )
+
     def url(self):
         if self.trace_id is not None:
             base = os.environ.get("PHOENIX_PUBLIC_URL", "").strip() or self.run.public_url
@@ -491,6 +534,18 @@ def token_usage(usage):
                  else getattr(details, "reasoning_tokens", None))
     if isinstance(reasoning, int) and not isinstance(reasoning, bool) and reasoning >= 0:
         result["reasoning"] = reasoning
+    prompt_details = (usage.get("prompt_tokens_details") if isinstance(usage, dict)
+                      else getattr(usage, "prompt_tokens_details", None))
+    cached = (prompt_details.get("cached_tokens") if isinstance(prompt_details, dict)
+              else getattr(prompt_details, "cached_tokens", None))
+    if cached is None:
+        cached = (usage.get("prompt_cache_hit_tokens") if isinstance(usage, dict)
+                  else getattr(usage, "prompt_cache_hit_tokens", None))
+    if cached is None:
+        cached = (usage.get("cache_read_input_tokens") if isinstance(usage, dict)
+                  else getattr(usage, "cache_read_input_tokens", None))
+    if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
+        result["cache_read"] = cached
     return result
 
 def _configured_client(*args, **kwargs):

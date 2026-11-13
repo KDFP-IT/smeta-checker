@@ -408,6 +408,9 @@ def check(context, record, index, payload, actor, *, automatic=False, continuati
         audit_run_id=str(record["id"]),
         redact_pdf=context.settings.telemetry_redact_pdf,
         mask_prompts=context.settings.telemetry_mask_prompts,
+        input_cost_per_1k=context.settings.llm_input_cost_per_1k,
+        output_cost_per_1k=context.settings.llm_output_cost_per_1k,
+        cache_read_cost_per_1k=context.settings.llm_cache_read_cost_per_1k,
         public_url=context.settings.phoenix_public_url,
         flush_on_close=False)
     trace = tracing.position(input={"operation": "normative-position-check", "position_index": index},

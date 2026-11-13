@@ -127,3 +127,40 @@ class TokenUsageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhoenixAttributeTests(unittest.TestCase):
+    def test_generation_usage_and_cost_use_openinference_attributes(self):
+        from audit_tracing import _kwargs_to_attrs
+
+        attrs = _kwargs_to_attrs(
+            "graph-request-evidence",
+            {
+                "as_type": "generation",
+                "model": "deepseek/deepseek-v4.1-flash",
+                "provider": "routerai",
+                "usage_details": {"input": 12971, "output": 946, "total": 13917, "reasoning": 0},
+                "cost": 0.002,
+            },
+        )
+        self.assertEqual(attrs["openinference.span.kind"], "LLM")
+        self.assertEqual(attrs["llm.token_count.prompt"], 12971)
+        self.assertEqual(attrs["llm.token_count.completion"], 946)
+        self.assertEqual(attrs["llm.token_count.total"], 13917)
+        self.assertEqual(attrs["llm.token_count.completion_details.reasoning"], 0)
+        self.assertEqual(attrs["llm.model_name"], "deepseek/deepseek-v4.1-flash")
+        self.assertEqual(attrs["llm.provider"], "routerai")
+        self.assertEqual(attrs["llm.cost.total"], 0.002)
+
+
+class CacheUsageTests(unittest.TestCase):
+    def test_cached_prompt_tokens_are_exposed_for_phoenix(self):
+        from audit_tracing import token_usage
+
+        usage = {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 40},
+        }
+        self.assertEqual(token_usage(usage)["cache_read"], 40)
