@@ -91,8 +91,7 @@ def run_graph_position(*, context: Any, run_id: UUID, position_index: int,
         if published:
             context.repository.finish_position_job(run_id, position_index, "done", result=assessment)
         return {"position_index": position_index, "duplicate": False, "http_attempts": 0}
-    run_config = record.get("config") or {}
-    explicit_pdf = bool(payload.get("pdf_name")) and bool(run_config.get("pdf_versions"))
+    explicit_pdf = bool(payload.get("pdf_name")) and not position.designation_refs
     _found, missing = (None, []) if explicit_pdf else verify_designations(
         list(position.designation_refs or []),
         index_designations(enumerate(prepared.texts, start=1)),
