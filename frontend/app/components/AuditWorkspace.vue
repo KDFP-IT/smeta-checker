@@ -38,6 +38,8 @@ const searchPages = ref<number[]>([])
 const mobileTab = ref<'vor' | 'pdf'>('vor')
 const isNarrow = ref(false)
 const pdfPanel = ref<{ find: (query: string) => Promise<number[]> }>()
+const evidenceQuote = computed(() => workspace.value?.evidence[0]?.quote || '')
+const evidenceRegion = computed(() => workspace.value?.evidence[0]?.region || null)
 const dossierItems: SplitterItem[] = [
   { slot: 'pdf', minSize: 30, defaultSize: 62 },
   { slot: 'dossier', minSize: 25, defaultSize: 38 },
@@ -324,6 +326,8 @@ onBeforeUnmount(() => {
                     :key="version"
                     :source-url="backend.contentUrl(version)"
                     :page="page"
+                    :quote="evidenceQuote"
+                    :region="evidenceRegion"
                     @page="changePage"
                   />
                   <p v-else class="empty">Для этого аудита PDF не выбран.</p>

@@ -656,5 +656,12 @@ onBeforeUnmount(() => {
     flex-direction: column;
     gap: 20px;
   }
+  .department-name {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    line-height: 1.3;
+  }
 }
 </style>
