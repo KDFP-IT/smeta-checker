@@ -701,6 +701,57 @@ def _addressed_evidence(page, evidence, stored, position):
     return row_quote, boxes
 
 
+def _cell_evidence_boxes(context, record, evidence, page_number, page, snapshot_cache=None):
+    """Recover a physical cell rectangle from the pinned prepared snapshot."""
+    import pymupdf
+    from audit_snapshot import load_snapshot
+    from normative_source_addresses import cell_source_handles
+
+    source_id = str(evidence.get("source_id") or "")
+    version_id = str(evidence.get("version_id") or "")
+    if not source_id or not version_id:
+        return []
+    config = record.get("config") or {}
+    pdf_name = str(evidence.get("filename") or "")
+    prepared = config.get("prepared_documents") or {}
+    if pdf_name not in prepared:
+        pdf_name = next(
+            (name for name, item in prepared.items()
+             if (item.get("snapshot") or {}).get("corpus_id")),
+            "",
+        )
+    ref = (prepared.get(pdf_name) or {}).get("snapshot")
+    if not ref:
+        return []
+    cache_key = str(ref.get("snapshot_key") or ref.get("snapshot_sha256") or ref)
+    if snapshot_cache is not None and cache_key in snapshot_cache:
+        snapshot = snapshot_cache[cache_key]
+    else:
+        try:
+            snapshot = load_snapshot(context.blob_store, ref)
+        except Exception:
+            return []
+        if snapshot_cache is not None:
+            snapshot_cache[cache_key] = snapshot
+    if not (1 <= page_number <= len(snapshot.tables or ())):
+        return []
+    for table in snapshot.tables[page_number - 1]:
+        for cell in table.get("cells") or []:
+            handles = cell_source_handles(
+                version_id, page_number, table.get("table_id"), cell.get("cell_id")
+            )
+            if source_id not in handles:
+                continue
+            bbox = cell.get("bbox") or []
+            if len(bbox) != 4:
+                continue
+            rect = pymupdf.Rect(bbox)
+            if rect.is_empty or rect.is_infinite or not page.cropbox.contains(rect):
+                continue
+            return [rect]
+    return []
+
+
 def source_evidence(context, record, index, position):
     import pymupdf
 
@@ -723,8 +774,10 @@ def source_evidence(context, record, index, position):
                     "quote": (source.get("text") or "")[:1200],
                     "kind": "work",
                     "version_id": source.get("version_id"),
+                    "source_id": source.get("id"),
                 }
             )
+    snapshot_cache = {}
     for evidence in entries:
         name = evidence.get("document_id") or stored.get("pdf_name") or ""
         version_id = (
@@ -753,6 +806,8 @@ def source_evidence(context, record, index, position):
                 continue
             page = pdf[page_number - 1]
             quote, boxes = _addressed_evidence(page, evidence, stored, position)
+            if not boxes:
+                boxes = _cell_evidence_boxes(context, record, evidence, page_number, page, snapshot_cache)
             if not boxes:
                 boxes = _quote_boxes(page, quote)
             # Repeated or long/multiline ambiguous hits do not become an accepted highlight.
