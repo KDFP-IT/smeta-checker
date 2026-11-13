@@ -139,7 +139,7 @@ def _ask(client, credentials, instructions, data, schema, trace, stage, stats, *
     stats["requests"] += 1
     max_tokens = response_token_limit(credentials)
     finish_reason = ''
-    with trace.stage(stage, as_type="generation", model=credentials.model_name, provider=credentials.provider, input=messages) as observation:
+    with trace.stage(stage, as_type="generation", model=credentials.model_name, provider=getattr(credentials, "provider", ""), input=messages) as observation:
         if _is_chat_backend(credentials.base_url):
             options: dict[str, Any] = {"response_format": {"type": "json_object"}}
             options.update(chat_generation_options(credentials.base_url, credentials.model_name))
@@ -233,8 +233,8 @@ def retrieve(context, record, index, payload, position, citations, kb, normalize
         environment=context.settings.phoenix_environment,
         audit_run_id=str(record["id"]), redact_pdf=context.settings.telemetry_redact_pdf,
         mask_prompts=context.settings.telemetry_mask_prompts,
-        input_cost_per_1k=context.settings.llm_input_cost_per_1k,
-        output_cost_per_1k=context.settings.llm_output_cost_per_1k)
+        input_cost_per_1k=getattr(context.settings, "llm_input_cost_per_1k", 0.0),
+        output_cost_per_1k=getattr(context.settings, "llm_output_cost_per_1k", 0.0))
     trace = tracing.position(input={"operation": "normative-context", "position_index": index},
         metadata={"operation": "normative-context", "position_index": index, "model": credentials.model_name})
 

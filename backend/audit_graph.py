@@ -1038,6 +1038,8 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
                     and _matches(fact_measure[1] * coefficient)):
                 own_state = "confirmed"
                 unit_measure = measure("1", position.get("unit", ""))
+                if unit_measure is None:
+                    continue
                 found_value = str(fact_measure[1] * coefficient / unit_measure[1])
                 found_unit = str(position.get("unit", ""))
                 derived_explanation = (

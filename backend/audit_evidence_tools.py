@@ -617,7 +617,7 @@ def prepared_area_candidates(tools: Any, position: Any) -> list[dict[str, Any]]:
                     values = [number(cell.get("text")) for cell in group]
                     if any(value is None for value in values):
                         continue
-                    total = sum(values, Decimal(0))
+                    total = sum((value for value in values if value is not None), Decimal(0))
                     if abs(total - area) > max(Decimal("0.02"), area * Decimal("0.0001")):
                         continue
                     columns = sorted({int(cell["column"]) for cell in group})

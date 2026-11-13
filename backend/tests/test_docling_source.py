@@ -75,7 +75,12 @@ def test_body_children_define_reading_order():
         {"cref": "#/texts/0"},
     ]
     text = docling_pages(raw)[0]["text"]
-    assert text.split("\n") == ["Раздел 1. Земляные работы", "Ведомость объёмов работ"]
+    assert text.split("\n") == [
+        "A | B",
+        "1 | 2",
+        "Раздел 1. Земляные работы",
+        "Ведомость объёмов работ",
+    ]
 
 
 def test_empty_document_has_no_pages():
@@ -143,7 +148,12 @@ def test_position_sort_overrides_body_order():
         {"cref": "#/texts/0"},
     ]
     text = docling_pages(raw, sort_by_position=True)[0]["text"]
-    assert text.split("\n") == ["Ведомость объёмов работ", "Раздел 1. Земляные работы"]
+    assert text.split("\n") == [
+        "A | B",
+        "1 | 2",
+        "Ведомость объёмов работ",
+        "Раздел 1. Земляные работы",
+    ]
 
 
 def test_row_number_and_colspan_are_visible():

@@ -263,9 +263,9 @@ def prepare_run(
         request_id=request_id,
         redact_pdf=context.settings.telemetry_redact_pdf,
         mask_prompts=context.settings.telemetry_mask_prompts,
-        input_cost_per_1k=context.settings.llm_input_cost_per_1k,
-        output_cost_per_1k=context.settings.llm_output_cost_per_1k,
-        cache_read_cost_per_1k=context.settings.llm_cache_read_cost_per_1k,
+        input_cost_per_1k=getattr(context.settings, "llm_input_cost_per_1k", 0.0),
+        output_cost_per_1k=getattr(context.settings, "llm_output_cost_per_1k", 0.0),
+        cache_read_cost_per_1k=getattr(context.settings, "llm_cache_read_cost_per_1k", 0.0),
     )
 
     queued: list[int] = []
@@ -800,9 +800,9 @@ def audit_position(
                 request_id=resolved_request,
                 redact_pdf=context.settings.telemetry_redact_pdf,
                 mask_prompts=context.settings.telemetry_mask_prompts,
-                input_cost_per_1k=context.settings.llm_input_cost_per_1k,
-                output_cost_per_1k=context.settings.llm_output_cost_per_1k,
-                cache_read_cost_per_1k=context.settings.llm_cache_read_cost_per_1k,
+                input_cost_per_1k=getattr(context.settings, "llm_input_cost_per_1k", 0.0),
+                output_cost_per_1k=getattr(context.settings, "llm_output_cost_per_1k", 0.0),
+                cache_read_cost_per_1k=getattr(context.settings, "llm_cache_read_cost_per_1k", 0.0),
             )
             try:
                 llm = context.settings.llm_credentials()

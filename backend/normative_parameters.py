@@ -388,7 +388,16 @@ def build_cards(position, result, positions, relation, *, resource_proofs=None):
                 str(getattr(owner, key, '') or '').strip() not in {'', 'Страница не указана'}
                 for key in ('page_ref', 'loc_desc')
             )
-            if ((location_required and p.get('scope_state') != 'verified')
+            relevant = [
+                item for item in result.get('items', [])
+                if p['source_id'] in item.get('project_source_ids', [])
+                and any(_parameter_claim(claim, claim_kind or kind)
+                        for claim in item.get('claim_ids', []))
+            ]
+            disputed = any(item.get('state') == 'needs_facts' for item in relevant)
+            scope_required = location_required or p.get('scope_state') not in {None, ''}
+            if ((scope_required and p.get('scope_state') != 'verified')
+                    or disputed
                     or not quoted(p['value'], p['quote'], scope)
                     or clean(scope) not in clean(source['text'])
                     or (declared_roles and (found_roles != declared_roles) and (kind == 'thickness' or found_roles)
