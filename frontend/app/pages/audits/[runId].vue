@@ -24,7 +24,6 @@ const route = useRoute(),
   cancelling = ref(false),
   resuming = ref(false),
   focus = ref('all'),
-  direction = ref('project'),
   query = ref(''),
   offset = ref(0)
 const position = computed(() =>
@@ -34,17 +33,12 @@ const position = computed(() =>
 )
 type QueueId = 'fix' | 'review' | 'missing' | 'ok' | 'pending' | 'all'
 const queues: { id: QueueId; label: string }[] = [
-  { id: 'fix', label: 'Исправить' },
+  { id: 'all', label: 'Все позиции' },
+  { id: 'fix', label: queueLabel('fix') },
   { id: 'review', label: queueLabel('review') },
   { id: 'missing', label: queueLabel('missing') },
-  { id: 'ok', label: queueLabel('ok') },
   { id: 'pending', label: queueLabel('pending') },
-  { id: 'all', label: 'Готовые позиции' },
-]
-const directions = [
-  { id: 'project', label: 'ПД' },
-  { id: 'normative', label: 'Нормативы' },
-  { id: 'relationships', label: 'Расчёты' },
+  { id: 'ok', label: queueLabel('ok') },
 ]
 const vorFileName = computed(() => formatFileName(run.value?.vor_filename || ''))
 const auditHeading = computed(() => summary.value?.project.name || 'Проверка документов')
@@ -55,6 +49,17 @@ function queueCount(id: QueueId) {
   if (id === 'all') return (summary.value.ready_positions ?? []).length
   return summary.value.queues[id] ?? 0
 }
+const queueTabs = computed(() =>
+  queues.map((item) => ({
+    label: item.label,
+    value: item.id,
+    badge: {
+      label: String(queueCount(item.id)),
+      color: item.id === 'all' ? ('neutral' as const) : queueColor(item.id),
+      variant: 'subtle' as const,
+    },
+  })),
+)
 function rowCell(row: RowsDto['rows'][number]) {
   // Cells map address -> value; show a stable source-row address, never a guess.
   if (typeof row.source_row !== 'number') return 'Позиция ' + row.number
@@ -89,7 +94,23 @@ const auditColumns: TableColumn<AuditRow>[] = [
   },
 ]
 const auditSorting = ref<SortingState>([])
+const pageSize = ref(10)
 const auditPagination = ref({ pageIndex: 0, pageSize: 10 })
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil((results.value?.total ?? 0) / pageSize.value)),
+)
+const currentPage = computed(() => Math.floor(offset.value / pageSize.value) + 1)
+const pageOptions = computed(() =>
+  Array.from({ length: pageCount.value }, (_, index) => ({
+    label: String(index + 1),
+    value: index + 1,
+  })),
+)
+const pageSizeOptions = [
+  { label: '10', value: 10 },
+  { label: '25', value: 25 },
+  { label: '50', value: 50 },
+]
 function openPosition(index: number) {
   router.replace({ query: { ...route.query, position: index } })
 }
@@ -100,28 +121,31 @@ function closePosition() {
 }
 const displayedReady = ref(0)
 const newReady = computed(() =>
-  Math.max(0, (summary.value?.ready_positions?.length ?? 0) - displayedReady.value),
+  results.value
+    ? Math.max(0, (summary.value?.ready_positions?.length ?? 0) - displayedReady.value)
+    : 0,
 )
 let active = true,
   timer: ReturnType<typeof setTimeout> | undefined,
   searchTimer: ReturnType<typeof setTimeout> | undefined,
   epoch = 0
-const fixButton = ref<HTMLButtonElement | null>(null)
 async function loadRows() {
   const current = ++epoch
   busy.value = true
   try {
     const data = await backend.rows(runId.value, {
       focus: focus.value,
-      direction: direction.value,
       q: query.value,
       offset: offset.value,
-      limit: 10,
+      limit: pageSize.value,
     })
     if (active && current === epoch) {
       results.value = data
       displayedReady.value = summary.value?.ready_positions?.length ?? 0
-      auditPagination.value = { pageIndex: Math.floor(offset.value / 10), pageSize: 10 }
+      auditPagination.value = {
+        pageIndex: Math.floor(offset.value / pageSize.value),
+        pageSize: pageSize.value,
+      }
     }
   } catch (e) {
     if (active && current === epoch) error.value = readableError(e)
@@ -129,18 +153,28 @@ async function loadRows() {
     if (active && current === epoch) busy.value = false
   }
 }
-function changePage(delta: number) {
-  offset.value = Math.max(0, offset.value + delta)
+function setPage(page: number) {
+  const target = Math.min(Math.max(1, page), pageCount.value)
+  offset.value = (target - 1) * pageSize.value
   loadRows()
 }
-function setDirection(id: string) {
-  direction.value = id
+function setPageSize(size: number) {
+  if (size === pageSize.value) return
+  pageSize.value = size
   offset.value = 0
   loadRows()
 }
-function setPage(page: number) {
-  offset.value = Math.max(0, (page - 1) * 10)
-  loadRows()
+function scrollQueueTabs(event: WheelEvent) {
+  const list = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.queue-tab-list')
+  if (!list || list.scrollWidth <= list.clientWidth) return
+  if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+  const step = event.deltaY * (event.deltaMode === 1 ? 16 : 1)
+  const max = list.scrollWidth - list.clientWidth
+  const next = Math.min(Math.max(0, list.scrollLeft + step), max)
+  // At either edge let the page scroll instead of swallowing the wheel.
+  if (next === list.scrollLeft) return
+  event.preventDefault()
+  list.scrollLeft = next
 }
 async function poll() {
   clearTimeout(timer)
@@ -376,51 +410,26 @@ onBeforeUnmount(() => {
         Продолжение обработает оставшиеся позиции. Готовые результаты и ваши основания сохранятся.
       </p>
       <template v-if="summary">
-        <div class="toolbar" aria-label="Готовые результаты">
-          <p>
-            Готово к просмотру: {{ summary.ready_positions?.length ?? 0 }} из
-            {{ run?.total ?? '…' }}. Порции по 10 позиций.
-          </p>
-          <UButton
-            :label="
-              newReady ? `Показать новые результаты · ${newReady}` : 'Обновить готовые позиции'
-            "
-            :loading="busy"
-            @click="loadRows"
-          />
-        </div>
         <div class="toolbar results-bar">
-          <div class="filters" role="group" aria-label="Фильтр позиций по очередям">
-            <button
-              v-for="item in queues"
-              :key="item.id"
-              :ref="
-                (el) => {
-                  if (item.id === 'fix') fixButton = el as HTMLButtonElement | null
-                }
-              "
-              type="button"
-              class="filter"
-              :aria-pressed="focus === item.id"
-              :aria-label="`${item.label}: ${queueCount(item.id)}`"
-              @click="focus = item.id"
-            >
-              <span class="filter-count" aria-hidden="true">{{ queueCount(item.id) }}</span>
-              <span>{{ item.label }}</span>
-            </button>
+          <div class="queue-tabs" @wheel="scrollQueueTabs">
+            <UTabs
+              :model-value="focus"
+              :items="queueTabs"
+              :content="false"
+              color="neutral"
+              activation-mode="manual"
+              aria-label="Статус позиций"
+              :ui="{
+                list: 'queue-tab-list',
+                indicator: 'bg-default shadow-sm',
+                trigger: 'queue-tab-trigger data-[state=active]:text-highlighted',
+              }"
+              @update:model-value="(value) => (focus = String(value))"
+            />
           </div>
-          <div class="filters" role="group" aria-label="Направление проверки">
-            <button
-              v-for="item in directions"
-              :key="item.id"
-              type="button"
-              class="filter"
-              :aria-pressed="direction === item.id"
-              @click="setDirection(item.id)"
-            >
-              <span>{{ item.label }}</span>
-            </button>
-          </div>
+          <UButton v-if="newReady" size="sm" variant="soft" @click="loadRows"
+            >Новые результаты · {{ newReady }}</UButton
+          >
           <UInput
             v-model="query"
             class="search"
@@ -430,7 +439,6 @@ onBeforeUnmount(() => {
         </div>
         <div class="panel table-wrap" :aria-busy="busy">
           <UTable
-            sticky="header"
             v-if="results?.rows?.length"
             :data="results.rows"
             v-model:sorting="auditSorting"
@@ -438,7 +446,7 @@ onBeforeUnmount(() => {
             :pagination-options="{ manualPagination: true, rowCount: results?.total ?? 0 }"
             :columns="auditColumns"
             :ui="{ base: 'table-fixed w-full' }"
-            class="results max-h-[60vh] overflow-y-auto overflow-x-hidden"
+            class="results"
           >
             <template #position-cell="{ row }">
               <div>
@@ -483,30 +491,49 @@ onBeforeUnmount(() => {
             </template>
           </UTable>
           <p v-if="!results?.rows.length && !busy" class="empty">По этому фильтру позиций нет.</p>
+          <div v-if="results?.total" class="table-footer">
+            <div class="page-size">
+              <span class="muted">Строк на странице</span>
+              <USelect
+                :model-value="pageSize"
+                :items="pageSizeOptions"
+                size="sm"
+                class="page-size-select"
+                aria-label="Строк на странице"
+                @update:model-value="(value) => setPageSize(Number(value))"
+              />
+            </div>
+            <div class="pager">
+              <UButton
+                icon="i-lucide-chevron-left"
+                color="neutral"
+                variant="ghost"
+                size="sm"
+                aria-label="Предыдущая страница"
+                :disabled="currentPage <= 1"
+                @click="setPage(currentPage - 1)"
+              />
+              <USelect
+                :model-value="currentPage"
+                :items="pageOptions"
+                size="sm"
+                class="page-select"
+                aria-label="Номер страницы"
+                @update:model-value="(value) => setPage(Number(value))"
+              />
+              <span class="muted">из {{ pageCount }}</span>
+              <UButton
+                icon="i-lucide-chevron-right"
+                color="neutral"
+                variant="ghost"
+                size="sm"
+                aria-label="Следующая страница"
+                :disabled="currentPage >= pageCount"
+                @click="setPage(currentPage + 1)"
+              />
+            </div>
+          </div>
         </div>
-        <div v-if="results && results.total > 10" class="toolbar pagination">
-          <UPagination
-            :page="Math.floor(offset / 10) + 1"
-            :items-per-page="10"
-            :total="results.total"
-            @update:page="setPage"
-          />
-        </div>
-        <section class="docs" aria-label="Исходные версии документов">
-          <h2>Исходные версии документов</h2>
-          <p v-for="doc in summary.documents" :key="doc.id">
-            {{ doc.filename }} · версия {{ doc.number }} · {{ doc.sha256.slice(0, 12) }}
-            <UButton
-              variant="link"
-              @click="
-                backend
-                  .download(backend.contentUrl(doc.id) + '?download=true', doc.filename)
-                  .catch((e) => (error = readableError(e)))
-              "
-              >Скачать</UButton
-            >
-          </p>
-        </section>
       </template>
       <AuditWorkspace
         v-if="position !== null && summary"
@@ -562,35 +589,38 @@ onBeforeUnmount(() => {
   margin: 16px 0;
 }
 .results-bar {
-  margin: 20px 0;
-}
-.filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.filter {
-  display: inline-flex;
+  margin: 20px 0 12px;
   align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  padding: 8px 14px;
-  border: 1px solid var(--ui-border);
+  gap: 12px;
+}
+.queue-tabs {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.queue-tabs :deep(.queue-tab-list) {
+  width: auto;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ui-border-accented) transparent;
+}
+.queue-tabs :deep(.queue-tab-list)::-webkit-scrollbar {
+  height: 6px;
+}
+.queue-tabs :deep(.queue-tab-list)::-webkit-scrollbar-track {
+  background: transparent;
+}
+.queue-tabs :deep(.queue-tab-list)::-webkit-scrollbar-thumb {
+  background: var(--ui-border-accented);
   border-radius: 999px;
-  background: var(--ui-bg-elevated);
-  color: var(--ui-text);
+}
+.queue-tabs :deep(.queue-tab-trigger) {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 4px 12px;
   font-size: 14px;
-  line-height: 1.4;
-}
-.filter-count {
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-.filter[aria-pressed='true'] {
-  background: var(--app-selected-bg);
-  color: var(--app-selected-text);
-  border-color: var(--app-selected-text);
-  font-weight: 600;
+  white-space: nowrap;
 }
 .search {
   flex: 1 1 240px;
@@ -599,6 +629,31 @@ onBeforeUnmount(() => {
 .table-wrap {
   min-width: 0;
   width: 100%;
+  overflow: hidden;
+}
+.table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-top: 1px solid var(--ui-border-muted);
+}
+.page-size,
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.page-size {
+  font-size: 14px;
+}
+.page-size-select {
+  width: 88px;
+}
+.page-select {
+  width: 76px;
 }
 .results :deep(table) {
   table-layout: fixed;
@@ -645,32 +700,6 @@ onBeforeUnmount(() => {
 }
 .row-action {
   text-align: right;
-  white-space: nowrap;
-}
-.pagination {
-  margin: 20px 0;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-gutter: stable;
-}
-.docs {
-  margin-top: 8px;
-  font-size: 14px;
-}
-.docs h2 {
-  font-size: 14px;
-  margin: 0;
-}
-.docs p {
-  margin: 8px 0;
-  color: var(--ui-text-muted);
-}
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
   white-space: nowrap;
 }
 @media (max-width: 700px) {
