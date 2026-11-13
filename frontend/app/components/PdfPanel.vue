@@ -17,6 +17,9 @@ const canvas = ref<HTMLCanvasElement>()
 const textHost = ref<HTMLElement>()
 const scroll = ref<HTMLElement>()
 const zoom = ref(1)
+const dragging = ref(false)
+let dragStart: { x: number; y: number; left: number; top: number; pointerId: number } | null = null
+let zoomAnchor: { x: number; y: number; clientX: number; clientY: number } | null = null
 const count = ref(0)
 const busy = ref(false)
 const ready = ref(false)
@@ -24,7 +27,7 @@ const error = ref('')
 const width = ref(0)
 const height = ref(0)
 const scale = ref(1)
-const highlightRects = ref<Array<{ left: number; top: number; width: number; height: number }>>([])
+const evidenceLabel = computed(() => (props.quote || '').match(/\d+(?:[.,]\d+)?/)?.[0] || '')
 const regionRects = computed(() => {
   const region = props.region
   if (!region || !region.width || !region.height || !width.value || !height.value) return []
@@ -41,6 +44,72 @@ let loading: PDFDocumentLoadingTask | null = null
 let renderTask: RenderTask | null = null
 let epoch = 0
 let resizeObserver: ResizeObserver | undefined
+
+function clampZoom(value: number) {
+  return Math.min(4, Math.max(0.5, value))
+}
+
+function setZoom(value: number, clientX?: number, clientY?: number) {
+  const next = clampZoom(value)
+  if (!scroll.value || next === zoom.value) return
+  const rect = scroll.value.getBoundingClientRect()
+  const x =
+    (scroll.value.scrollLeft + (clientX ?? rect.left + rect.width / 2) - rect.left) /
+    scroll.value.scrollWidth
+  const y =
+    (scroll.value.scrollTop + (clientY ?? rect.top + rect.height / 2) - rect.top) /
+    scroll.value.scrollHeight
+  zoomAnchor = {
+    x,
+    y,
+    clientX: clientX ?? rect.left + rect.width / 2,
+    clientY: clientY ?? rect.top + rect.height / 2,
+  }
+  zoom.value = next
+}
+
+function handleWheel(event: WheelEvent) {
+  if (!event.ctrlKey) return
+  event.preventDefault()
+  setZoom(zoom.value + (event.deltaY < 0 ? 0.25 : -0.25), event.clientX, event.clientY)
+}
+
+function startDrag(event: PointerEvent) {
+  if (event.button !== 0 || !scroll.value) return
+  const target = event.target as HTMLElement
+  if (target.closest('button, input, a, textarea, select')) return
+  dragStart = {
+    x: event.clientX,
+    y: event.clientY,
+    left: scroll.value.scrollLeft,
+    top: scroll.value.scrollTop,
+    pointerId: event.pointerId,
+  }
+  dragging.value = true
+  event.preventDefault()
+  try {
+    scroll.value.setPointerCapture(event.pointerId)
+  } catch {
+    // Pointer capture is best-effort; pointermove still works on the element.
+  }
+}
+
+function moveDrag(event: PointerEvent) {
+  if (!dragStart || !scroll.value || dragStart.pointerId !== event.pointerId) return
+  scroll.value.scrollLeft = dragStart.left - (event.clientX - dragStart.x)
+  scroll.value.scrollTop = dragStart.top - (event.clientY - dragStart.y)
+}
+
+function endDrag(event: PointerEvent) {
+  if (!dragStart || dragStart.pointerId !== event.pointerId) return
+  dragging.value = false
+  dragStart = null
+  try {
+    scroll.value?.releasePointerCapture(event.pointerId)
+  } catch {
+    // Already released by the browser.
+  }
+}
 
 async function render() {
   if (!documentPdf || !canvas.value || !textHost.value || !scroll.value) return
@@ -72,12 +141,6 @@ async function render() {
     if (current !== epoch) return
     textHost.value.innerHTML = ''
     const text = await page.getTextContent()
-    highlightRects.value = evidenceRects(
-      text.items as PdfTextItem[],
-      viewport,
-      pdfjs,
-      props.quote || '',
-    )
     await new pdfjs.TextLayer({
       textContentSource: text,
       container: textHost.value,
@@ -85,13 +148,19 @@ async function render() {
     }).render()
     if (current !== epoch) return
     ready.value = true
-    scroll.value.scrollTop = 0
-    markEvidence()
-    if (highlightRects.value[0]) {
+    if (zoomAnchor) {
+      const rect = scroll.value.getBoundingClientRect()
+      scroll.value.scrollLeft = Math.max(
+        0,
+        zoomAnchor.x * scroll.value.scrollWidth - (zoomAnchor.clientX - rect.left),
+      )
       scroll.value.scrollTop = Math.max(
         0,
-        highlightRects.value[0].top - scroll.value.clientHeight / 2 + 24,
+        zoomAnchor.y * scroll.value.scrollHeight - (zoomAnchor.clientY - rect.top),
       )
+      zoomAnchor = null
+    } else {
+      scroll.value.scrollTop = 0
     }
   } catch (e) {
     if (current === epoch && !(e instanceof Error && e.name === 'RenderingCancelledException'))
@@ -99,74 +168,6 @@ async function render() {
   } finally {
     if (current === epoch) busy.value = false
   }
-}
-
-type PdfTextItem = { str?: string; transform?: number[]; width?: number; height?: number }
-
-function evidenceRects(
-  items: PdfTextItem[],
-  viewport: { transform: number[]; scale: number },
-  pdfjs: any,
-  quote: string,
-) {
-  const normalized = quote.replace(/\s+/g, ' ').trim().toLocaleLowerCase('ru-RU')
-  if (!normalized) return []
-  const numbers = [...new Set(normalized.match(/\d+(?:[.,]\d+)?/g) || [])].filter(
-    (item) => item.length >= 2,
-  )
-  const needles = normalized.length <= 120 ? [normalized, ...numbers] : numbers.slice(0, 24)
-  const rects = []
-  for (const item of items) {
-    if (!item.str || !item.transform || item.width == null || item.height == null) continue
-    const text = item.str.replace(/\s+/g, ' ').trim().toLocaleLowerCase('ru-RU')
-    if (!text) continue
-    if (
-      !needles.some(
-        (needle) =>
-          text.includes(needle) ||
-          (needle.length >= 4 && needle.includes(text) && text.length >= 3),
-      )
-    )
-      continue
-    const tx = pdfjs.Util.transform(viewport.transform, item.transform)
-    const angle = Math.atan2(tx[1], tx[0])
-    if (Math.abs(angle) > 0.02) continue
-    const fontHeight = Math.hypot(tx[2], tx[3])
-    rects.push({
-      left: tx[4],
-      top: tx[5] - fontHeight,
-      width: item.width * viewport.scale,
-      height: fontHeight,
-    })
-  }
-  return rects
-}
-
-function markEvidence() {
-  const host = textHost.value
-  if (!host) return
-  host
-    .querySelectorAll('.pdf-evidence-hit')
-    .forEach((el) => el.classList.remove('pdf-evidence-hit'))
-  const quote = (props.quote || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('ru-RU')
-  if (!quote) return
-  const numbers = [...new Set(quote.match(/\d+(?:[.,]\d+)?/g) || [])].filter(
-    (item) => item.length >= 2,
-  )
-  const needles = quote.length <= 120 ? [quote, ...numbers] : numbers.slice(0, 24)
-  let first: HTMLElement | null = null
-  host.querySelectorAll<HTMLElement>('span').forEach((span) => {
-    const text = (span.textContent || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('ru-RU')
-    if (!text) return
-    const hit = needles.some(
-      (needle) =>
-        text.includes(needle) || (needle.length >= 4 && needle.includes(text) && text.length >= 3),
-    )
-    if (!hit) return
-    span.classList.add('pdf-evidence-hit')
-    first ??= span
-  })
-  first?.scrollIntoView({ block: 'center', inline: 'nearest' })
 }
 
 async function open() {
@@ -209,7 +210,7 @@ function changePage(value: number) {
 
 watch(() => props.sourceUrl, open)
 watch(() => props.page, render)
-watch(() => props.quote, markEvidence)
+watch(() => props.quote, render)
 watch(zoom, render)
 onMounted(() => {
   open()
@@ -284,30 +285,38 @@ defineExpose({ find })
         color="neutral"
         icon="i-lucide-zoom-out"
         aria-label="Уменьшить PDF"
-        @click="zoom = Math.max(0.5, zoom - 0.5)"
+        @click="setZoom(zoom - 0.5)"
       /><UButton
         variant="outline"
         color="neutral"
         icon="i-lucide-zoom-in"
         aria-label="Увеличить PDF"
-        @click="zoom = Math.min(4, zoom + 0.5)"
-      /><UButton variant="ghost" color="neutral" @click="zoom = 1">По ширине</UButton
+        @click="setZoom(zoom + 0.5)"
+      /><UButton variant="ghost" color="neutral" @click="setZoom(1)">По ширине</UButton
       ><span v-if="busy && !ready" class="muted" role="status">Открываем…</span>
     </div>
     <div v-if="error" class="error-box" role="alert">
       {{ error }} <UButton @click="open">Повторить</UButton>
     </div>
-    <div ref="scroll" class="pdf-scroll">
+    <div
+      ref="scroll"
+      class="pdf-scroll"
+      :class="{ 'is-dragging': dragging }"
+      @wheel="handleWheel"
+      @pointerdown="startDrag"
+      @pointermove="moveDrag"
+      @pointerup="endDrag"
+      @pointercancel="endDrag"
+    >
       <div
         class="pdf-stage"
-        :class="{ 'pdf-stage-evidence': quote && !regionRects.length && !highlightRects.length }"
         :style="{ width: width + 'px', height: height + 'px', '--scale-factor': scale }"
       >
         <canvas ref="canvas" :style="{ width: width + 'px', height: height + 'px' }"></canvas>
         <div ref="textHost" class="textLayer"></div>
         <div class="evidenceLayer" aria-hidden="true">
           <span
-            v-for="(rect, index) in regionRects.length ? regionRects : highlightRects"
+            v-for="(rect, index) in regionRects"
             :key="index"
             class="evidence-mark"
             :style="{
@@ -316,14 +325,10 @@ defineExpose({ find })
               width: rect.width + 'px',
               height: rect.height + 'px',
             }"
-          />
-        </div>
-        <div
-          v-if="quote && !regionRects.length && !highlightRects.length"
-          class="evidence-page-badge"
-          role="status"
-        >
-          Подтверждение на этой странице
+            ><span v-if="index === 0 && evidenceLabel" class="evidence-label">{{
+              evidenceLabel
+            }}</span></span
+          >
         </div>
       </div>
     </div>
@@ -346,8 +351,9 @@ defineExpose({ find })
   font-variant-numeric: tabular-nums;
 }
 .pdf-scroll {
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: auto;
+  cursor: grab;
+  user-select: none;
   flex: 1;
   min-height: 100px;
   background: var(--ui-bg-muted);
@@ -357,7 +363,7 @@ defineExpose({ find })
   position: relative;
   box-sizing: content-box;
   margin: 0 auto;
-  max-width: 100%;
+  max-width: none;
   overflow: hidden;
   background: var(--ui-bg);
   border: 1px solid var(--ui-border);
@@ -366,6 +372,9 @@ defineExpose({ find })
   --min-font-size: 1;
   --scale-round-x: 1px;
   --scale-round-y: 1px;
+}
+.pdf-scroll.is-dragging {
+  cursor: grabbing;
 }
 .pdf-stage canvas {
   display: block;
@@ -397,26 +406,29 @@ defineExpose({ find })
 }
 .evidence-mark {
   position: absolute;
-  border: 1px solid var(--ui-warning);
+  border: 2px solid var(--ui-warning);
   border-radius: 2px;
   background: color-mix(in srgb, var(--ui-warning) 42%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-warning) 22%, transparent);
-  animation: pdf-evidence-pulse 1.1s ease-in-out 2;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-warning) 22%, transparent);
 }
-@keyframes pdf-evidence-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-warning) 22%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 6px color-mix(in srgb, var(--ui-warning) 30%, transparent);
-  }
+.evidence-label {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 5px);
+  transform: translateX(-50%);
+  padding: 1px 5px;
+  border: 1px solid var(--ui-warning);
+  border-radius: 4px;
+  color: var(--ui-warning);
+  background: var(--ui-bg);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 .textLayer :deep(.pdf-evidence-hit) {
   background: color-mix(in srgb, var(--ui-warning) 42%, transparent);
   border-radius: 2px;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--ui-warning) 75%, transparent);
-  animation: pdf-evidence-pulse 1.1s ease-in-out 2;
 }
 @keyframes pdf-evidence-pulse {
   0%,
@@ -426,23 +438,6 @@ defineExpose({ find })
   50% {
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-warning) 35%, transparent);
   }
-}
-.pdf-stage-evidence {
-  border-color: var(--ui-warning);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-warning) 30%, transparent);
-}
-.evidence-page-badge {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 4;
-  padding: 4px 8px;
-  border: 1px solid var(--ui-warning);
-  border-radius: 6px;
-  color: var(--ui-warning);
-  background: color-mix(in srgb, var(--ui-bg) 92%, var(--ui-warning));
-  font-size: 12px;
-  font-weight: 600;
 }
 .page-input {
   width: 72px;
