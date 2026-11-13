@@ -64,7 +64,7 @@ const historyRuns = ref<RunDto[]>([])
 const historyBusy = ref(false)
 const historyError = ref('')
 const historyHasMore = ref(false)
-const revisionsOpen = ref(true)
+const revisionsOpen = ref(false)
 const runsOpen = ref(false)
 const preflightColumns: TableColumn<PreflightRow>[] = [
   { accessorKey: 'vor', header: 'ВОР' },
@@ -103,13 +103,18 @@ const selectedVersion = computed<RichVersion | null>(() => {
     null
   )
 })
+const currentVersionNumber = computed(
+  () =>
+    sortedVersions.value.find((version) => version.id === document.value?.current_version_id)
+      ?.number || selectedVersion.value?.number,
+)
 const bindingReferences = ref<string[]>([])
 const bindingDraft = ref<Record<string, string>>({})
 const savedBindings = ref('{}')
 const bindingOptions = ref<BindingOption[]>([])
 const bindingsBusy = ref(false)
 const bindingsError = ref('')
-const bindingsManualOpen = ref(true)
+const bindingsManualOpen = ref(false)
 let bindingEpoch = 0
 const bindingsDirty = computed(() => JSON.stringify(bindingDraft.value) !== savedBindings.value)
 const fileTypeLabel = computed(() => {
@@ -575,11 +580,11 @@ onBeforeUnmount(() => {
           <h1 class="title-text" :title="document?.title || 'Документ'">
             {{ busy ? 'Загружаем…' : document?.title || 'Документ' }}
           </h1>
-          <p v-if="document" class="muted title-meta">
-            Редакций: {{ sortedVersions.length }}
-            <span v-if="document.pd_updated">· ПД обновлён после последнего запуска</span>
+          <p v-if="document && (document.pd_updated || document.last_run)" class="muted title-meta">
+            <span v-if="document.pd_updated">ПД обновлён после последнего запуска</span>
+            <span v-if="document.pd_updated && document.last_run"> · </span>
             <span v-if="document.last_run">
-              · Последний запуск {{ formatDate(document.last_run.created_at) }}
+              Последний запуск {{ formatDate(document.last_run.created_at) }}
             </span>
           </p>
         </div>
@@ -669,81 +674,6 @@ onBeforeUnmount(() => {
       </div>
 
       <template v-if="document && selectedVersion">
-        <section class="panel revision-panel revision-overview" aria-label="Текущая редакция">
-          <div class="revision-copy">
-            <div
-              class="file-mark"
-              :class="isVor ? 'file-mark-xlsx' : 'file-mark-pdf'"
-              aria-hidden="true"
-            >
-              <span>{{ fileTypeLabel }}</span>
-            </div>
-            <div class="revision-identity">
-              <span class="section-kicker">Текущая редакция</span>
-              <strong class="source-name" :title="selectedVersion.filename">
-                {{ selectedVersion.filename }}
-              </strong>
-              <span class="muted">
-                Редакция {{ selectedVersion.number }} · {{ formatBytes(selectedVersion.size) }} ·
-                {{ formatDate(selectedVersion.created_at) }}
-              </span>
-            </div>
-          </div>
-          <div class="revision-controls">
-            <div class="revision-select">
-              <label class="muted" for="revision-select">Выбрать редакцию</label>
-              <USelect
-                id="revision-select"
-                :model-value="selectedVersion.id"
-                :items="
-                  sortedVersions.map((v) => ({
-                    label: `${v.filename}, редакция ${v.number}${v.id === document?.current_version_id ? ' · действующая' : ''}`,
-                    value: v.id,
-                  }))
-                "
-                aria-label="Редакция документа"
-                @update:model-value="selectVersion(String($event))"
-              />
-            </div>
-            <div class="toolbar revision-actions">
-              <input
-                ref="revisionInput"
-                type="file"
-                :accept="isVor ? '.xlsx,.csv' : '.pdf'"
-                class="revision-file"
-                :aria-label="`Файл новой редакции ${kindLabel}`"
-                @change="onRevisionPicked($event)"
-              />
-              <UButton
-                variant="outline"
-                :loading="uploadBusy"
-                :disabled="uploadBusy || !!locksMutations"
-                aria-label="Новая редакция"
-                @click="revisionInput?.click()"
-              >
-                Новая редакция
-              </UButton>
-              <UButton
-                variant="outline"
-                :aria-label="`Скачать ${selectedVersion.filename}, редакция ${selectedVersion.number}`"
-                @click="downloadRevision(selectedVersion)"
-              >
-                Скачать
-              </UButton>
-            </div>
-          </div>
-          <div v-if="selectedVersion.id !== document.current_version_id" class="revision-current">
-            <UButton
-              variant="outline"
-              :disabled="!!locksMutations"
-              :aria-label="`Сделать действующей редакцию ${selectedVersion.number}`"
-              @click="setCurrent(selectedVersion.id)"
-            >
-              Сделать действующей
-            </UButton>
-          </div>
-        </section>
-
         <section
           v-if="isVor"
           class="panel binding-panel"
@@ -780,10 +710,6 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="binding-auto-copy">
                   <strong>Связи определены по именам файлов</strong>
-                  <span class="muted">
-                    {{ resolvedBindingGroups.filter((group) => group.option).length }} из
-                    {{ resolvedBindingGroups.length }} определено автоматически
-                  </span>
                 </div>
                 <UButton
                   variant="outline"
@@ -896,17 +822,9 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div class="launch-bar">
-            <div class="launch-copy">
-              <strong>{{
-                bindingsDirty ? 'Есть несохранённые изменения' : 'Можно запускать проверку'
-              }}</strong>
-              <span class="muted">
-                {{
-                  bindingsDirty
-                    ? 'Сначала сохраните выбранные PDF.'
-                    : 'Привязки фиксируются внутри нового запуска.'
-                }}
-              </span>
+            <div v-if="bindingsDirty" class="launch-copy">
+              <strong>Есть несохранённые изменения</strong>
+              <span class="muted">Сначала сохраните выбранные PDF.</span>
             </div>
             <div class="toolbar launch-actions">
               <label class="profile-row">
@@ -993,25 +911,47 @@ onBeforeUnmount(() => {
           class="panel disclosure-panel"
           :aria-label="isVor ? 'История редакций ВОР' : 'История редакций ПД'"
         >
-          <button
-            type="button"
-            class="disclosure-trigger"
-            :aria-label="isVor ? 'История редакций ВОР' : 'История редакций ПД'"
-            :aria-expanded="revisionsOpen"
-            @click="revisionsOpen = !revisionsOpen"
-          >
-            <span class="disclosure-title">
-              <UIcon name="i-lucide-layers-3" />
-              <span>
-                <strong>{{ isVor ? 'История редакций ВОР' : 'История редакций ПД' }}</strong>
-                <small
-                  >{{ sortedVersions.length }} редакций · текущая №
-                  {{ selectedVersion.number }}</small
-                >
+          <div class="disclosure-header">
+            <button
+              type="button"
+              class="disclosure-trigger"
+              :aria-label="isVor ? 'История редакций ВОР' : 'История редакций ПД'"
+              :aria-expanded="revisionsOpen"
+              @click="revisionsOpen = !revisionsOpen"
+            >
+              <span class="disclosure-title">
+                <UIcon name="i-lucide-layers-3" />
+                <span>
+                  <strong>{{ isVor ? 'Редакции ВОР' : 'Редакции ПД' }}</strong>
+                  <small
+                    >{{ sortedVersions.length }} редакций · действующая №
+                    {{ currentVersionNumber }}</small
+                  >
+                </span>
               </span>
-            </span>
-            <UIcon :name="revisionsOpen ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'" />
-          </button>
+              <UIcon :name="revisionsOpen ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'" />
+            </button>
+            <div class="revision-header-actions">
+              <input
+                ref="revisionInput"
+                type="file"
+                :accept="isVor ? '.xlsx,.csv' : '.pdf'"
+                class="revision-file"
+                :aria-label="`Файл новой редакции ${kindLabel}`"
+                @change="onRevisionPicked($event)"
+              />
+              <UButton
+                variant="outline"
+                icon="i-lucide-plus"
+                :loading="uploadBusy"
+                :disabled="uploadBusy || !!locksMutations"
+                aria-label="Добавить новую редакцию"
+                @click="revisionInput?.click()"
+              >
+                Новая редакция
+              </UButton>
+            </div>
+          </div>
           <ul
             v-if="revisionsOpen"
             class="revision-list disclosure-content"
@@ -1051,6 +991,16 @@ onBeforeUnmount(() => {
               </div>
               <div class="revision-history-actions">
                 <UButton
+                  v-if="version.id !== document.current_version_id"
+                  variant="ghost"
+                  color="primary"
+                  :disabled="!!locksMutations"
+                  :aria-label="`Сделать действующей редакцию ${version.number}`"
+                  @click="setCurrent(version.id)"
+                >
+                  Сделать действующей
+                </UButton>
+                <UButton
                   v-if="version.id !== selectedVersion.id"
                   variant="ghost"
                   color="neutral"
@@ -1086,10 +1036,7 @@ onBeforeUnmount(() => {
 
         <section v-if="isVor" class="panel runs-panel" aria-label="Проверки выбранной редакции">
           <div class="runs-heading">
-            <div>
-              <span class="section-kicker">Редакция {{ selectedVersion.number }}</span>
-              <h2>Проверки</h2>
-            </div>
+            <h2>Проверки</h2>
             <UBadge variant="soft" color="neutral" :label="`${historyRuns.length} запусков`" />
           </div>
           <p v-if="historyBusy" class="empty" role="status">Загружаем запуски…</p>
@@ -1099,7 +1046,7 @@ onBeforeUnmount(() => {
               Повторить
             </UButton>
           </p>
-          <p v-else-if="!historyRuns.length" class="empty" role="status">
+          <p v-else-if="!historyRuns.length" class="empty runs-empty" role="status">
             Запусков с этим документом пока нет.
           </p>
           <template v-else>
@@ -1746,6 +1693,9 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 2px;
 }
+.launch-actions {
+  margin-left: auto;
+}
 .preflight-block {
   margin-top: 16px;
   display: flex;
@@ -1783,6 +1733,24 @@ onBeforeUnmount(() => {
 .disclosure-panel {
   padding: 0 !important;
   overflow: hidden;
+}
+.disclosure-header {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid transparent;
+}
+.disclosure-header:has(+ .disclosure-content) {
+  border-bottom-color: var(--ui-border-muted);
+}
+.disclosure-header .disclosure-trigger {
+  width: auto;
+  flex: 1;
+}
+.revision-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding-right: 24px;
 }
 .disclosure-trigger,
 .runs-trigger {
@@ -1825,7 +1793,6 @@ onBeforeUnmount(() => {
 .disclosure-content {
   margin: 0;
   padding: 16px 24px 24px;
-  border-top: 1px solid var(--ui-border-muted);
 }
 .disclosure-content .revision-row {
   display: grid;
@@ -1837,8 +1804,8 @@ onBeforeUnmount(() => {
   background: var(--ui-bg);
 }
 .disclosure-content .revision-row-current {
-  border-color: color-mix(in srgb, var(--ui-primary) 48%, var(--ui-border));
-  background: color-mix(in srgb, var(--app-selected-bg) 55%, var(--ui-bg));
+  border-color: var(--ui-border-accented);
+  background: color-mix(in srgb, var(--ui-bg-muted) 55%, var(--ui-bg));
 }
 .revision-number {
   display: flex;
@@ -1894,7 +1861,15 @@ onBeforeUnmount(() => {
 .runs-panel {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 12px;
+}
+.runs-empty {
+  justify-content: center;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: center;
 }
 .latest-run {
   display: grid;
@@ -2073,6 +2048,16 @@ onBeforeUnmount(() => {
   }
   .disclosure-content {
     padding-inline: 12px;
+  }
+  .disclosure-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .revision-header-actions {
+    padding: 0 16px 16px;
+  }
+  .revision-header-actions > * {
+    width: 100%;
   }
   .disclosure-content .revision-row {
     grid-template-columns: 44px minmax(0, 1fr);

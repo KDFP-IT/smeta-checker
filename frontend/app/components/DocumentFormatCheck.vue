@@ -14,24 +14,6 @@ let epoch = 0
 
 const sheetItems = useFormatSheets(result)
 
-const formatBadge = computed(() => {
-  const status = (props.version.format_status ?? {}) as Record<string, unknown>
-  if (status.state === 'passed')
-    return { color: 'success' as const, label: 'Оформление: соответствует' }
-  if (status.state === 'failed') {
-    const errors = Number(status.error_count ?? 0)
-    const warnings = Number(status.warning_count ?? 0)
-    const parts = []
-    if (errors) parts.push(`ошибок: ${errors}`)
-    if (warnings) parts.push(`замечаний: ${warnings}`)
-    return {
-      color: 'warning' as const,
-      label: `Оформление: ${parts.join(', ') || 'есть замечания'}`,
-    }
-  }
-  return null
-})
-
 async function check() {
   const current = ++epoch
   checking.value = true
@@ -81,13 +63,6 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <UBadge
-    v-if="formatBadge"
-    :color="formatBadge.color"
-    variant="soft"
-    size="sm"
-    :label="formatBadge.label"
-  />
   <UButton
     v-if="props.version.filename.toLowerCase().endsWith('.xlsx')"
     icon="i-lucide-spell-check"
