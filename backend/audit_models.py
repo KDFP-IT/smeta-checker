@@ -803,6 +803,7 @@ class AuditSettings(BaseModel):
     allowed_llm_hosts: tuple[str, ...] = ("ai.api.cloud.yandex.net",)
     llm_input_cost_per_1k: float = 0.0
     llm_output_cost_per_1k: float = 0.0
+    llm_cache_read_cost_per_1k: float = 0.0
 
     @classmethod
     def load(cls, file_values: Any = None, secrets: Any = None) -> "AuditSettings":
@@ -987,6 +988,15 @@ class AuditSettings(BaseModel):
             llm_output_cost_per_1k=float(
                 get_setting(
                     "AUDIT_LLM_OUTPUT_COST_PER_1K",
+                    "0",
+                    file_values=file_values,
+                    secrets=secrets,
+                )
+                or 0
+            ),
+            llm_cache_read_cost_per_1k=float(
+                get_setting(
+                    "AUDIT_LLM_CACHE_READ_COST_PER_1K",
                     "0",
                     file_values=file_values,
                     secrets=secrets,

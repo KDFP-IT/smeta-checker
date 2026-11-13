@@ -9,9 +9,6 @@ from html import escape
 from uuid import UUID
 from typing import Any, Literal
 
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
-
 from audit_models import VorPosition
 from workspace_models import ResultDTO, RunDTO
 
@@ -445,6 +442,9 @@ def validated_word_report(context, record):
 
 
 def sheet_window(data: bytes, position: VorPosition):
+    from openpyxl import load_workbook
+    from openpyxl.utils import column_index_from_string, get_column_letter
+
     sheet = position.position_source.sheet if position.position_source else ""
     source_row = position.position_source.row if position.position_source else None
     if not sheet or source_row is None:
@@ -452,15 +452,22 @@ def sheet_window(data: bytes, position: VorPosition):
     book = load_workbook(io.BytesIO(data), data_only=False, keep_links=False)
     try:
         sheet_obj = book[sheet]
-        low = high = source_row
-        # One reviewed row only. Identifiers and type remain internal metadata.
-        columns = list(range(1, 6))
-        merged = list(sheet_obj.merged_cells.ranges)
+        low = max(1, source_row - 3)
+        high = source_row + 3
         coords = (
             set((position.position_source.cells or {}).keys())
             if position.position_source
             else set()
         )
+        # Show the reviewed row with nearby context, including the type and
+        # note columns (A-K) used by the VOR workbook.
+        last_column = 11
+        for coordinate in coords:
+            letters = "".join(ch for ch in coordinate if ch.isalpha())
+            if letters:
+                last_column = max(last_column, column_index_from_string(letters))
+        columns = list(range(1, last_column + 1))
+        merged = list(sheet_obj.merged_cells.ranges)
         rows = []
         for number in range(low, high + 1):
             cells = []
@@ -475,7 +482,7 @@ def sheet_window(data: bytes, position: VorPosition):
                     ),
                     None,
                 )
-                if span and col != span.min_col:
+                if span and (col != span.min_col or number != span.min_row):
                     continue
                 if span:
                     cell = sheet_obj.cell(span.min_row, span.min_col)
@@ -486,7 +493,7 @@ def sheet_window(data: bytes, position: VorPosition):
                         "column_span": min(span.max_col, columns[-1]) - col + 1
                         if span
                         else 1,
-                        "row_span": 1,
+                        "row_span": min(span.max_row, high) - number + 1 if span else 1,
                         "highlight": cell.coordinate in coords and number == source_row,
                     }
                 )
@@ -701,6 +708,64 @@ def _addressed_evidence(page, evidence, stored, position):
     return row_quote, boxes
 
 
+def _cell_evidence_boxes(context, record, evidence, page_number, page, snapshot_cache=None):
+    """Recover a physical cell rectangle from the pinned prepared snapshot."""
+    import pymupdf
+    from audit_snapshot import load_snapshot
+    from normative_source_addresses import cell_source_handles
+
+    source_id = str(evidence.get("source_id") or "")
+    version_id = str(evidence.get("version_id") or "")
+    if not source_id or not version_id:
+        return []
+    config = record.get("config") or {}
+    pdf_name = str(evidence.get("filename") or "")
+    prepared = config.get("prepared_documents") or {}
+    if pdf_name not in prepared:
+        pdf_name = next(
+            (name for name, item in prepared.items()
+             if (item.get("snapshot") or {}).get("corpus_id")),
+            "",
+        )
+    ref = (prepared.get(pdf_name) or {}).get("snapshot")
+    if not ref:
+        return []
+    cache_key = str(ref.get("snapshot_key") or ref.get("snapshot_sha256") or ref)
+    if snapshot_cache is not None and cache_key in snapshot_cache:
+        snapshot = snapshot_cache[cache_key]
+    else:
+        try:
+            snapshot = load_snapshot(context.blob_store, ref)
+        except Exception:
+            return []
+        if snapshot_cache is not None:
+            snapshot_cache[cache_key] = snapshot
+    if not (1 <= page_number <= len(snapshot.tables or ())):
+        return []
+    for table in snapshot.tables[page_number - 1]:
+        for cell in table.get("cells") or []:
+            handles = cell_source_handles(
+                version_id, page_number, table.get("table_id"), cell.get("cell_id")
+            )
+            if source_id not in handles and source_id != str(cell.get("cell_id")):
+                continue
+            bbox = cell.get("bbox") or []
+            if len(bbox) != 4:
+                continue
+            rect = pymupdf.Rect(bbox)
+            if rect.is_empty or rect.is_infinite:
+                continue
+            # Docling cell boxes are already in the page's display frame.
+            # Convert back to the unrotated frame because source_evidence
+            # applies page.rotation_matrix to every returned rectangle.
+            if page.rotation:
+                rect = rect * page.derotation_matrix
+            if not page.cropbox.contains(rect):
+                continue
+            return [rect]
+    return []
+
+
 def source_evidence(context, record, index, position):
     import pymupdf
 
@@ -723,8 +788,10 @@ def source_evidence(context, record, index, position):
                     "quote": (source.get("text") or "")[:1200],
                     "kind": "work",
                     "version_id": source.get("version_id"),
+                    "source_id": source.get("id"),
                 }
             )
+    snapshot_cache = {}
     for evidence in entries:
         name = evidence.get("document_id") or stored.get("pdf_name") or ""
         version_id = (
@@ -753,6 +820,8 @@ def source_evidence(context, record, index, position):
                 continue
             page = pdf[page_number - 1]
             quote, boxes = _addressed_evidence(page, evidence, stored, position)
+            if not boxes:
+                boxes = _cell_evidence_boxes(context, record, evidence, page_number, page, snapshot_cache)
             if not boxes:
                 boxes = _quote_boxes(page, quote)
             # Repeated or long/multiline ambiguous hits do not become an accepted highlight.

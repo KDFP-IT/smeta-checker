@@ -49,6 +49,9 @@ def column_unit(table, cell):
         if header.get('header_refinement'):
             continue  # Crop-derived units need their explicit two-read proof.
         text = unicodedata.normalize('NFKC',header['text']).casefold()
+        # Superscript digits are frequently recognized as ``{2``/``{3``.
+        # Repair only that literal OCR shape; do not invent a missing unit.
+        text = re.sub(r'(?<=\b[мm])\{\s*([23])', r'\1', text)
         units.update(re.findall(r'(?<!\w)(?:м[23]|m[23]|мм|см|км|м|шт|кг|т)(?!\w)', text))
     return next(iter(units)) if len(units) == 1 else ''
 

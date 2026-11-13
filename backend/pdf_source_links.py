@@ -2,8 +2,17 @@
 import math
 
 
+def _apply_matrix(box, matrix):
+    """Apply a PyMuPDF 6-tuple matrix to an axis-aligned box via its corners."""
+    a, b, c, d, e, f = (float(value) for value in matrix)
+    corners = [(box[0], box[1]), (box[2], box[1]), (box[0], box[3]), (box[2], box[3])]
+    mapped = [(a * x + c * y + e, b * x + d * y + f) for x, y in corners]
+    xs = [point[0] for point in mapped]
+    ys = [point[1] for point in mapped]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 def source_link(index, version, page, table, cell):
-    from ocr_engine import _apply_matrix
 
     anchor = dict(version_id=version, page=page, table_id=table['table_id'],
         cell_id=cell['cell_id'], header_ids=list(cell.get('header_ids') or []),

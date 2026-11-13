@@ -7,6 +7,7 @@ from copy import deepcopy
 from functools import lru_cache
 import hashlib
 import json
+import os
 from pathlib import Path
 
 DEFAULT_QUESTION = (
@@ -66,10 +67,31 @@ def put(context,ident,value):
     return context.repository.save_analysis_artifact(ident['project_id'],ident,value)
 
 
-def prepared_inputs(data,version):
+def extraction_engine(config=None):
+    """PDF extraction backend; a run's pinned choice outranks the environment."""
+    explicit=(config or {}).get('extraction_engine')
+    return str(explicit or os.environ.get('EXTRACTION_ENGINE','legacy')).strip().lower()
+
+
+def prepared_inputs(data,version,engine=None):
     """Explicit raw-source contract shared by preparation and cache lookup."""
-    from pdf_text import PDFTextSource,TABLE_OUTPUT,MAX_TABLE_CELL_CHARS,SOURCE_BYTES_CONTRACT
     from document_preparation import VERSION
+    from pdf_text import SOURCE_BYTES_CONTRACT
+    if str(engine or extraction_engine())=='docling':
+        # docling-serve owns layout, OCR and table structure as one factory;
+        # none of the legacy per-cell settings participate. The table toggle
+        # changes emitted text, so it belongs in every cache key.
+        table_structure=os.environ.get('DOCLING_SERVE_TABLE_STRUCTURE','false')
+        batch=os.environ.get('DOCLING_SERVE_PAGE_BATCH','8')
+        return dict(pdf_sha256=hashlib.sha256(bytes(data)).hexdigest(),
+            source_bytes_contract=SOURCE_BYTES_CONTRACT,
+            preparation_version=VERSION,
+            version_id=str(version),extraction_key=hashlib.sha256(
+                f'docling:v1:rapidocr:cyrillic:fast:{table_structure}:batch{batch}'.encode()).hexdigest(),
+            ocr_settings_key=hashlib.sha256(
+                f'docling:rapidocr:cyrillic:fast:{table_structure}'.encode()).hexdigest(),
+            table_key=hashlib.sha256(f'docling-table:{table_structure}'.encode()).hexdigest())
+    from pdf_text import PDFTextSource,TABLE_OUTPUT,MAX_TABLE_CELL_CHARS
     return dict(pdf_sha256=hashlib.sha256(bytes(data)).hexdigest(),
         source_bytes_contract=SOURCE_BYTES_CONTRACT,
         preparation_version=VERSION,
@@ -78,8 +100,8 @@ def prepared_inputs(data,version):
         table_key=hashlib.sha256((PDFTextSource._table_key_for(MAX_TABLE_CELL_CHARS)+':full-document-v1').encode()).hexdigest())
 
 
-def prepared_identity(record,data,version):
-    return identity('prepared_pdf',record,prepared_inputs(data,version))
+def prepared_identity(record,data,version,engine=None):
+    return identity('prepared_pdf',record,prepared_inputs(data,version,engine))
 
 
 def store_prepared(context,ident,state):

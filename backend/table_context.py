@@ -144,15 +144,17 @@ def select_fragment(table, limit, score):
     if len(full[0]) <= limit:
         return full
     first, last = body_start(table), table["row_count"]
+    def row_text(row):
+        return " ".join(
+            cell["text"]
+            for cell in table["cells"]
+            if cell["row"] <= row < cell["row"] + cell.get("rowspan", 1)
+        )
+
     candidates = [
         (
-            score(
-                " ".join(
-                    cell["text"]
-                    for cell in table["cells"]
-                    if cell["row"] <= row < cell["row"] + cell.get("rowspan", 1)
-                )
-            ),
+            score(row_text(row))
+            + (1000 if re.search(r"\b(всего|итого|итог)\b", row_text(row), re.I) else 0),
             row,
         )
         for row in range(first, last)

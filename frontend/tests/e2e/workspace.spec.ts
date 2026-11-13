@@ -113,7 +113,7 @@ test('progress shows PDF preparation, survives a network error and reaches saved
   await expect(page.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50', {
     timeout: 10000,
   })
-  await page.getByRole('button', { name: /^Готовые позиции: \d+$/ }).click()
+  await page.getByRole('tab', { name: /^Все позиции/ }).click()
   await expect(page.getByRole('button', { name: 'Открыть позицию', exact: true })).toBeVisible()
   await expect(page.getByRole('progressbar')).toBeHidden()
 })
@@ -149,7 +149,7 @@ test('saved audit opens exact input, actual PDF and survives reload', async ({ p
   test.skip(!process.env.E2E_FIXTURE_ROOT, 'Requires an explicitly isolated fixture')
   const runId = readFileSync(resolve(process.env.E2E_FIXTURE_ROOT!, 'run-id.txt'), 'utf8').trim()
   await page.goto('/audits/' + runId)
-  await page.getByRole('button', { name: /^Готовые позиции: \d+$/ }).click()
+  await page.getByRole('tab', { name: /^Все позиции/ }).click()
   await page.getByRole('button', { name: 'Открыть позицию', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Сверка ВОР с PDF' })).toBeVisible()
   await expect(page.locator('.pdf-stage canvas')).toHaveAttribute('width', /[1-9]\d*/)
@@ -163,9 +163,9 @@ test('saved audit opens exact input, actual PDF and survives reload', async ({ p
     .toBe(true)
   await page.getByRole('button', { name: 'Оглавление', exact: true }).click()
   await expect(page.getByRole('region', { name: 'Дерево разделов PDF' })).toBeVisible()
-  await expect(page.locator('.sheet-scroll')).toContainText('Copper cable')
-  // The position card shows parsed work fields rather than spreadsheet column letters.
-  await expect(page.locator('.excel-pane')).toContainText('Наименование')
+  await page.getByRole('tab', { name: 'ВОР', exact: true }).click()
+  await expect(page.locator('.aw-sheet-grid')).toContainText('Copper cable')
+  await expect(page.getByRole('region', { name: 'Результат проверки' })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
   await expect(page.getByRole('button', { name: 'Открыть позицию', exact: true })).toBeFocused()
@@ -223,12 +223,12 @@ test('upload, preflight, audit, persisted results and Word export use real API',
   await page.getByLabel('Подтверждаю запуск несмотря на критические ошибки').check()
   await page.getByTestId('start-audit').click()
   await expect(page).toHaveURL(/\/audits\/[^/?]+$/)
-  await page.getByRole('button', { name: /^Готовые позиции: \d+$/ }).click()
+  await page.getByRole('tab', { name: /^Все позиции/ }).click()
   await expect(
     page.getByRole('button', { name: 'Открыть позицию', exact: true }).first(),
   ).toBeVisible()
   await page.reload()
-  await page.getByRole('button', { name: /^Готовые позиции: \d+$/ }).click()
+  await page.getByRole('tab', { name: /^Все позиции/ }).click()
   await page.getByRole('button', { name: 'Открыть позицию', exact: true }).first().click()
   const review = page.getByRole('dialog', { name: 'Сверка ВОР с PDF' })
   await expect(review).toContainText('Позиция 1 из 2')

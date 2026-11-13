@@ -339,3 +339,84 @@ def test_old_preparation_contract_gets_new_snapshot_without_rewriting_old_one(bu
     assert next(r['result']for r in record['indexed_results']if r['position_index']==0)==previous_result
     prepare(p)
     assert p.repo.load_run(p.run.id)['config']['preparation_history']==history
+
+
+def docling_document(template, first, last):
+    """Minimal DoclingDocument JSON for absolute pages ``first..last``."""
+    from copy import deepcopy
+
+    result = deepcopy(template)
+    result.update(pages={}, texts=[], tables=[], body=dict(template["body"], children=[]))
+    for page_no in range(first, last + 1):
+        result["pages"][str(page_no)] = dict(template["pages"]["1"], page_no=page_no)
+        for kind in ("texts", "tables"):
+            for item in template[kind]:
+                copy = deepcopy(item)
+                copy["self_ref"] = f"{item['self_ref']}-{page_no}"
+                copy["prov"] = [dict(prov, page_no=page_no) for prov in item["prov"]]
+                result[kind].append(copy)
+                result["body"]["children"].append({"cref": copy["self_ref"]})
+    return result
+
+
+@pytest.fixture
+def docling(monkeypatch):
+    import json
+    from pathlib import Path
+
+    import docling_client
+
+    template = json.loads(
+        (Path(__file__).parent / "fixtures" / "docling_page.json").read_text(encoding="utf-8")
+    )
+    monkeypatch.setenv("EXTRACTION_ENGINE", "docling")
+    monkeypatch.setenv("DOCLING_SERVE_PAGE_BATCH", "2")
+    calls = []
+
+    def convert(pdf_bytes, *, filename, page_range, **kwargs):
+        calls.append((filename, page_range))
+        return docling_document(template, *page_range)
+
+    with patch("audit_tracing._configured_client", return_value=None):
+        yield SimpleNamespace(convert=convert, calls=calls, client=docling_client)
+
+
+def test_docling_engine_prepares_document_from_batches(build, docling):
+    p = build()
+    with patch.object(docling.client, "convert_pages", docling.convert):
+        assert prepare(p)["queued"] == [0, 1]
+    assert docling.calls == [("project.pdf", (1, 2)), ("project.pdf", (3, 3))]
+    config = p.repo.load_run(p.run.id)["config"]
+    assert config["documents_prepared"] is True
+    assert config["extraction_engine"] == "docling"
+    assert config["pdf_preparation"] == {"done": 3, "total": 3}
+    jobs = p.repo.list_position_jobs(p.run.id)
+    assert len({job.payload["snapshot"]["snapshot_key"] for job in jobs}) == 1
+    index = load_snapshot(p.context.blob_store, jobs[0].payload["snapshot"])
+    assert len(index.texts) == 3
+    assert index.metadata["preparation_complete"] and index.metadata["ocr"]["engine"] == "docling"
+    assert not index.pending_ocr
+    docling.calls.clear()
+    with patch.object(docling.client, "convert_pages", docling.convert):
+        assert prepare(p)["queued"] == [0, 1]
+    assert docling.calls == []
+    assert not p.repo.load_run(p.run.id)["config"].get("preparation_history")
+
+
+def test_docling_failure_never_dispatches_a_position(build, docling):
+    from docling_client import DoclingError
+
+    class Unavailable:
+        def __call__(self, *args, **kwargs):
+            raise DoclingError("docling unavailable: connect refused")
+
+    p = build()
+    with (
+        patch.object(docling.client, "convert_pages", Unavailable()),
+        pytest.raises(DoclingError),
+    ):
+        prepare(p)
+    assert p.repo.list_position_jobs(p.run.id) == []
+    config = p.repo.load_run(p.run.id)["config"]
+    assert config["pdf_preparation"] == {"done": 0, "total": 3}
+    assert not config.get("documents_prepared")

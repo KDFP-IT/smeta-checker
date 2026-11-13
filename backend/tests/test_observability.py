@@ -127,6 +127,47 @@ class RedactionTests(unittest.TestCase):
         )
 
 
+class OpenInferenceTests(unittest.TestCase):
+    def test_llm_span_gets_kind_value_and_model(self):
+        from audit_tracing import _kwargs_to_attrs
+
+        attrs = _kwargs_to_attrs(
+            "generate-audit",
+            {"input": {"pages": [1, 2]}, "output": "ok", "model": "qwen"},
+        )
+        self.assertEqual(attrs["openinference.span.kind"], "LLM")
+        self.assertEqual(attrs["input.value"], '{"pages": [1, 2]}')
+        self.assertEqual(attrs["output.value"], "ok")
+        self.assertEqual(attrs["input.mime_type"], "application/json")
+        self.assertEqual(attrs["llm.model_name"], "qwen")
+
+    def test_chain_span_has_no_llm_model(self):
+        from audit_tracing import _kwargs_to_attrs
+
+        attrs = _kwargs_to_attrs("select-context", {"input": "x"})
+        self.assertEqual(attrs["openinference.span.kind"], "CHAIN")
+        self.assertNotIn("llm.model_name", attrs)
+
+    def test_observation_close_sets_status(self):
+        from opentelemetry import trace
+
+        class FakeSpan:
+            status = None
+
+            def set_status(self, status):
+                self.status = status
+
+        ok_span = FakeSpan()
+        Observation(ok_span, "x").close()
+        self.assertEqual(ok_span.status.status_code, trace.StatusCode.OK)
+
+        error_span = FakeSpan()
+        observation = Observation(error_span, "x")
+        observation.fail()
+        observation.close()
+        self.assertEqual(error_span.status.status_code, trace.StatusCode.ERROR)
+
+
 class UploadSecurityTests(unittest.TestCase):
     def _context(self, **overrides):
         from api import ApiContext
@@ -299,3 +340,13 @@ class MetricsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CacheCostTests(unittest.TestCase):
+    def test_cache_read_is_charged_at_cached_rate(self):
+        from audit_observability import estimate_cost
+
+        self.assertEqual(
+            estimate_cost({"input": 1000, "output": 1000, "cache_read": 400}, 2, 4, 1),
+            5.6,
+        )

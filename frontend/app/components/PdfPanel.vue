@@ -2,12 +2,24 @@
 import type { PDFDocumentProxy, PDFDocumentLoadingTask, RenderTask } from 'pdfjs-dist'
 import { clampPage } from '~/utils/presentation'
 
-const props = defineProps<{ sourceUrl: string; page: number }>()
+const props = defineProps<{
+  sourceUrl: string
+  page: number
+  quote?: string
+  region?: {
+    width: number
+    height: number
+    highlights: Array<{ bbox: number[]; text: string }>
+  } | null
+}>()
 const emit = defineEmits<{ page: [page: number]; loaded: [count: number] }>()
 const canvas = ref<HTMLCanvasElement>()
 const textHost = ref<HTMLElement>()
 const scroll = ref<HTMLElement>()
 const zoom = ref(1)
+const dragging = ref(false)
+let dragStart: { x: number; y: number; left: number; top: number; pointerId: number } | null = null
+let zoomAnchor: { x: number; y: number; clientX: number; clientY: number } | null = null
 const count = ref(0)
 const busy = ref(false)
 const ready = ref(false)
@@ -15,11 +27,89 @@ const error = ref('')
 const width = ref(0)
 const height = ref(0)
 const scale = ref(1)
+const evidenceLabel = computed(() => (props.quote || '').match(/\d+(?:[.,]\d+)?/)?.[0] || '')
+const regionRects = computed(() => {
+  const region = props.region
+  if (!region || !region.width || !region.height || !width.value || !height.value) return []
+  const sx = width.value / region.width
+  const sy = height.value / region.height
+  return (region.highlights || []).flatMap((item) => {
+    if (item.bbox.length !== 4) return []
+    const [x0, y0, x1, y1] = item.bbox as [number, number, number, number]
+    return [{ left: x0 * sx, top: y0 * sy, width: (x1 - x0) * sx, height: (y1 - y0) * sy }]
+  })
+})
 let documentPdf: PDFDocumentProxy | null = null
 let loading: PDFDocumentLoadingTask | null = null
 let renderTask: RenderTask | null = null
 let epoch = 0
 let resizeObserver: ResizeObserver | undefined
+
+function clampZoom(value: number) {
+  return Math.min(4, Math.max(0.5, value))
+}
+
+function setZoom(value: number, clientX?: number, clientY?: number) {
+  const next = clampZoom(value)
+  if (!scroll.value || next === zoom.value) return
+  const rect = scroll.value.getBoundingClientRect()
+  const x =
+    (scroll.value.scrollLeft + (clientX ?? rect.left + rect.width / 2) - rect.left) /
+    scroll.value.scrollWidth
+  const y =
+    (scroll.value.scrollTop + (clientY ?? rect.top + rect.height / 2) - rect.top) /
+    scroll.value.scrollHeight
+  zoomAnchor = {
+    x,
+    y,
+    clientX: clientX ?? rect.left + rect.width / 2,
+    clientY: clientY ?? rect.top + rect.height / 2,
+  }
+  zoom.value = next
+}
+
+function handleWheel(event: WheelEvent) {
+  if (!event.ctrlKey) return
+  event.preventDefault()
+  setZoom(zoom.value + (event.deltaY < 0 ? 0.25 : -0.25), event.clientX, event.clientY)
+}
+
+function startDrag(event: PointerEvent) {
+  if (event.button !== 0 || !scroll.value) return
+  const target = event.target as HTMLElement
+  if (target.closest('button, input, a, textarea, select')) return
+  dragStart = {
+    x: event.clientX,
+    y: event.clientY,
+    left: scroll.value.scrollLeft,
+    top: scroll.value.scrollTop,
+    pointerId: event.pointerId,
+  }
+  dragging.value = true
+  event.preventDefault()
+  try {
+    scroll.value.setPointerCapture(event.pointerId)
+  } catch {
+    // Pointer capture is best-effort; pointermove still works on the element.
+  }
+}
+
+function moveDrag(event: PointerEvent) {
+  if (!dragStart || !scroll.value || dragStart.pointerId !== event.pointerId) return
+  scroll.value.scrollLeft = dragStart.left - (event.clientX - dragStart.x)
+  scroll.value.scrollTop = dragStart.top - (event.clientY - dragStart.y)
+}
+
+function endDrag(event: PointerEvent) {
+  if (!dragStart || dragStart.pointerId !== event.pointerId) return
+  dragging.value = false
+  dragStart = null
+  try {
+    scroll.value?.releasePointerCapture(event.pointerId)
+  } catch {
+    // Already released by the browser.
+  }
+}
 
 async function render() {
   if (!documentPdf || !canvas.value || !textHost.value || !scroll.value) return
@@ -58,7 +148,20 @@ async function render() {
     }).render()
     if (current !== epoch) return
     ready.value = true
-    scroll.value.scrollTop = 0
+    if (zoomAnchor) {
+      const rect = scroll.value.getBoundingClientRect()
+      scroll.value.scrollLeft = Math.max(
+        0,
+        zoomAnchor.x * scroll.value.scrollWidth - (zoomAnchor.clientX - rect.left),
+      )
+      scroll.value.scrollTop = Math.max(
+        0,
+        zoomAnchor.y * scroll.value.scrollHeight - (zoomAnchor.clientY - rect.top),
+      )
+      zoomAnchor = null
+    } else {
+      scroll.value.scrollTop = 0
+    }
   } catch (e) {
     if (current === epoch && !(e instanceof Error && e.name === 'RenderingCancelledException'))
       error.value = 'Не удалось открыть страницу PDF.'
@@ -107,6 +210,7 @@ function changePage(value: number) {
 
 watch(() => props.sourceUrl, open)
 watch(() => props.page, render)
+watch(() => props.quote, render)
 watch(zoom, render)
 onMounted(() => {
   open()
@@ -181,26 +285,51 @@ defineExpose({ find })
         color="neutral"
         icon="i-lucide-zoom-out"
         aria-label="Уменьшить PDF"
-        @click="zoom = Math.max(0.5, zoom - 0.5)"
+        @click="setZoom(zoom - 0.5)"
       /><UButton
         variant="outline"
         color="neutral"
         icon="i-lucide-zoom-in"
         aria-label="Увеличить PDF"
-        @click="zoom = Math.min(4, zoom + 0.5)"
-      /><UButton variant="ghost" color="neutral" @click="zoom = 1">По ширине</UButton
+        @click="setZoom(zoom + 0.5)"
+      /><UButton variant="ghost" color="neutral" @click="setZoom(1)">По ширине</UButton
       ><span v-if="busy && !ready" class="muted" role="status">Открываем…</span>
     </div>
     <div v-if="error" class="error-box" role="alert">
       {{ error }} <UButton @click="open">Повторить</UButton>
     </div>
-    <div ref="scroll" class="pdf-scroll">
+    <div
+      ref="scroll"
+      class="pdf-scroll"
+      :class="{ 'is-dragging': dragging }"
+      @wheel="handleWheel"
+      @pointerdown="startDrag"
+      @pointermove="moveDrag"
+      @pointerup="endDrag"
+      @pointercancel="endDrag"
+    >
       <div
         class="pdf-stage"
         :style="{ width: width + 'px', height: height + 'px', '--scale-factor': scale }"
       >
         <canvas ref="canvas" :style="{ width: width + 'px', height: height + 'px' }"></canvas>
         <div ref="textHost" class="textLayer"></div>
+        <div class="evidenceLayer" aria-hidden="true">
+          <span
+            v-for="(rect, index) in regionRects"
+            :key="index"
+            class="evidence-mark"
+            :style="{
+              left: rect.left + 'px',
+              top: rect.top + 'px',
+              width: rect.width + 'px',
+              height: rect.height + 'px',
+            }"
+            ><span v-if="index === 0 && evidenceLabel" class="evidence-label">{{
+              evidenceLabel
+            }}</span></span
+          >
+        </div>
       </div>
     </div>
   </div>
@@ -222,8 +351,9 @@ defineExpose({ find })
   font-variant-numeric: tabular-nums;
 }
 .pdf-scroll {
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: auto;
+  cursor: grab;
+  user-select: none;
   flex: 1;
   min-height: 100px;
   background: var(--ui-bg-muted);
@@ -233,7 +363,7 @@ defineExpose({ find })
   position: relative;
   box-sizing: content-box;
   margin: 0 auto;
-  max-width: 100%;
+  max-width: none;
   overflow: hidden;
   background: var(--ui-bg);
   border: 1px solid var(--ui-border);
@@ -242,6 +372,9 @@ defineExpose({ find })
   --min-font-size: 1;
   --scale-round-x: 1px;
   --scale-round-y: 1px;
+}
+.pdf-scroll.is-dragging {
+  cursor: grabbing;
 }
 .pdf-stage canvas {
   display: block;
@@ -264,6 +397,47 @@ defineExpose({ find })
 }
 .textLayer :deep(::selection) {
   background: color-mix(in srgb, var(--ui-info) 35%, transparent);
+}
+.evidenceLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+.evidence-mark {
+  position: absolute;
+  border: 2px solid var(--ui-warning);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--ui-warning) 42%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-warning) 22%, transparent);
+}
+.evidence-label {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 5px);
+  transform: translateX(-50%);
+  padding: 1px 5px;
+  border: 1px solid var(--ui-warning);
+  border-radius: 4px;
+  color: var(--ui-warning);
+  background: var(--ui-bg);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.textLayer :deep(.pdf-evidence-hit) {
+  background: color-mix(in srgb, var(--ui-warning) 42%, transparent);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ui-warning) 75%, transparent);
+}
+@keyframes pdf-evidence-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--ui-warning) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--ui-warning) 35%, transparent);
+  }
 }
 .page-input {
   width: 72px;

@@ -91,7 +91,8 @@ def run_graph_position(*, context: Any, run_id: UUID, position_index: int,
         if published:
             context.repository.finish_position_job(run_id, position_index, "done", result=assessment)
         return {"position_index": position_index, "duplicate": False, "http_attempts": 0}
-    _found, missing = verify_designations(
+    explicit_pdf = bool(payload.get("pdf_name")) and not position.designation_refs
+    _found, missing = (None, []) if explicit_pdf else verify_designations(
         list(position.designation_refs or []),
         index_designations(enumerate(prepared.texts, start=1)),
     )
@@ -146,12 +147,19 @@ def run_graph_position(*, context: Any, run_id: UUID, position_index: int,
             audit_run_id=str(run_id), request_id=request_id,
             redact_pdf=context.settings.telemetry_redact_pdf,
             mask_prompts=context.settings.telemetry_mask_prompts,
+            input_cost_per_1k=getattr(context.settings, "llm_input_cost_per_1k", 0.0),
+            output_cost_per_1k=getattr(context.settings, "llm_output_cost_per_1k", 0.0),
+            cache_read_cost_per_1k=getattr(context.settings, "llm_cache_read_cost_per_1k", 0.0),
             public_url=context.settings.phoenix_public_url,
         )
         trace = tracing.position(input={"position_index": position_index}, metadata={"position_index": position_index})
         stats: dict[str, Any] = {"requests": 0, "usage": {}, "responses": [], "warnings": []}
         config = record.get("config", {}) or {}
-        selected = config.get("selected_indices") or [position_index]
+        selected = (
+            config.get("selected_indices")
+            or config.get("position_inputs")
+            or [position_index]
+        )
         run_cap = int(config.get("max_http_attempts", 6 * len(selected)))
         position_cap = int(config.get("max_position_attempts", 6))
         client = (context.client_factory or __import__("openai").OpenAI)(

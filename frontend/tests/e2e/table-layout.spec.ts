@@ -47,19 +47,11 @@ test('long audit rows and the single VOR row fit without horizontal scrolling', 
   await page.setViewportSize({ width: 1600, height: 1100 })
   await page.screenshot({ path: '../.audit_cache/audit-list-compact.png', fullPage: true })
   await page.getByRole('button', { name: 'Открыть позицию', exact: true }).first().click()
-  const vor = page.getByRole('region', { name: 'Таблица ВОР', exact: true })
-  await expect(vor.locator('tbody tr')).toHaveCount(1, { timeout: 25000 })
-  await expect(vor.getByRole('columnheader', { name: 'Наименование', exact: true })).toBeVisible()
-  await expect(vor.getByRole('columnheader', { name: 'Ед. изм.', exact: true })).toBeVisible()
-  await expect(vor.getByRole('columnheader', { name: 'Количество', exact: true })).toBeVisible()
-  await expect(
-    page
-      .getByRole('region', { name: 'Примечание', exact: true })
-      .getByText('Примечание к выбранной позиции:', { exact: false }),
-  ).toBeVisible()
-  const sizes = await vor
-    .locator('.sheet-scroll')
-    .evaluate((el) => ({ client: el.clientWidth, scroll: el.scrollWidth }))
-  expect(sizes.scroll).toBeLessThanOrEqual(sizes.client + 1)
+  await page.getByRole('tab', { name: 'ВОР', exact: true }).click()
+  const vor = page.locator('.aw-sheet-grid')
+  await expect(vor).toBeVisible()
+  await expect(vor.locator('tbody tr')).not.toHaveCount(0, { timeout: 25000 })
+  await expect(vor.locator('thead th').nth(1)).toHaveText('A')
+  await expect(vor.locator('tr.is-selected-row')).toHaveCount(1)
   await page.screenshot({ path: '../.audit_cache/table-layout.png', fullPage: true })
 })

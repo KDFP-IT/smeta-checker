@@ -156,6 +156,7 @@ def estimate_cost(
     usage: dict[str, int] | Any,
     input_per_1k: float,
     output_per_1k: float,
+    cache_read_per_1k: float = 0.0,
 ) -> float | None:
     """Estimate LLM cost from reported tokens; ``None`` when unknown.
 
@@ -183,10 +184,19 @@ def estimate_cost(
 
     prompt = _count(tokens.get("input"))
     completion = _count(tokens.get("output"))
+    cache_read = _count(tokens.get("cache_read"))
     if prompt is None or completion is None:
         return None
     if input_per_1k <= 0 or output_per_1k <= 0:
         return None
+    if cache_read is not None and cache_read_per_1k > 0:
+        cached = min(cache_read, prompt)
+        return round(
+            (prompt - cached) / 1000 * input_per_1k
+            + cached / 1000 * cache_read_per_1k
+            + completion / 1000 * output_per_1k,
+            6,
+        )
     return round(prompt / 1000 * input_per_1k + completion / 1000 * output_per_1k, 6)
 
 

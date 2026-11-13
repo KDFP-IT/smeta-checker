@@ -380,11 +380,26 @@ def build_cards(position, result, positions, relation, *, resource_proofs=None):
             def roles(text):
                 return set(re.findall(r'нижн|средн|верхн', clean(text)))
             declared_roles, found_roles = roles(owner.work_name), roles(scope)
-            relevant = [i for i in result.get('items', []) if p['source_id'] in i.get('project_source_ids', [])
-                and any(_parameter_claim(claim, claim_kind or kind) for claim in i.get('claim_ids', []))]
-            disputed = any(i.get('state') == 'needs_facts' for i in relevant)
-            if (p.get('scope_state') != 'verified' or not quoted(p['value'], p['quote'], scope)
-                    or clean(scope) not in clean(source['text']) or disputed
+            # A VOR row without a page/location cannot prove a section that
+            # does not exist in its own input. The material, thickness and
+            # physical-column headers still have to be verified; only the
+            # absent location requirement is dropped.
+            location_required = any(
+                str(getattr(owner, key, '') or '').strip() not in {'', 'Страница не указана'}
+                for key in ('page_ref', 'loc_desc')
+            )
+            relevant = [
+                item for item in result.get('items', [])
+                if p['source_id'] in item.get('project_source_ids', [])
+                and any(_parameter_claim(claim, claim_kind or kind)
+                        for claim in item.get('claim_ids', []))
+            ]
+            disputed = any(item.get('state') == 'needs_facts' for item in relevant)
+            scope_required = location_required or p.get('scope_state') not in {None, ''}
+            if ((scope_required and p.get('scope_state') != 'verified')
+                    or disputed
+                    or not quoted(p['value'], p['quote'], scope)
+                    or clean(scope) not in clean(source['text'])
                     or (declared_roles and (found_roles != declared_roles) and (kind == 'thickness' or found_roles)
                         and not technological_part(owner,p,source,comparison_group,work_scope))):
                 c['reason'] = 'Принадлежность числа той же конструкции, слою и участку не подтверждена; сравнение не выполнено.'

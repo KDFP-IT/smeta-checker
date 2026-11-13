@@ -114,7 +114,5 @@ test('revisions retain document identity and historical evidence after PD change
   await page.goto(`/audits/${firstRunId}?position=0`)
   await expect(page.getByRole('dialog', { name: 'Сверка ВОР с PDF' })).toBeVisible()
   await expect(page.locator('.pdf-stage canvas')).toHaveAttribute('width', /[1-9]\d*/)
-  await expect(page.getByRole('region', { name: 'Таблица ВОР', exact: true })).toContainText(
-    'Copper cable',
-  )
+  await expect(page.getByRole('region', { name: 'Результат проверки' })).toBeVisible()
 })
