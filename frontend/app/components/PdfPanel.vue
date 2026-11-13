@@ -35,7 +35,7 @@ const regionRects = computed(() => {
   const sy = height.value / region.height
   return (region.highlights || []).flatMap((item) => {
     if (item.bbox.length !== 4) return []
-    const [x0, y0, x1, y1] = item.bbox
+    const [x0, y0, x1, y1] = item.bbox as [number, number, number, number]
     return [{ left: x0 * sx, top: y0 * sy, width: (x1 - x0) * sx, height: (y1 - y0) * sy }]
   })
 })

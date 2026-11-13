@@ -163,9 +163,9 @@ test('saved audit opens exact input, actual PDF and survives reload', async ({ p
     .toBe(true)
   await page.getByRole('button', { name: 'Оглавление', exact: true }).click()
   await expect(page.getByRole('region', { name: 'Дерево разделов PDF' })).toBeVisible()
-  await expect(page.locator('.sheet-scroll')).toContainText('Copper cable')
-  // The position card shows parsed work fields rather than spreadsheet column letters.
-  await expect(page.locator('.excel-pane')).toContainText('Наименование')
+  await page.getByRole('tab', { name: 'ВОР', exact: true }).click()
+  await expect(page.locator('.aw-sheet-grid')).toContainText('Copper cable')
+  await expect(page.getByRole('region', { name: 'Результат проверки' })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
   await expect(page.getByRole('button', { name: 'Открыть позицию', exact: true })).toBeFocused()
