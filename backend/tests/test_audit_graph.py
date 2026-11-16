@@ -489,6 +489,63 @@ def test_unit_item_does_not_close_binding_or_quantity(monkeypatch):
     assert states["project:own_quantity_inputs"] == "confirmed"
 
 
+def test_rounded_quantity_match_confirms_without_scope(monkeypatch):
+    from audit_graph import validate_evidence
+
+    sources = [
+        {
+            "id": "s1",
+            "kind": "project",
+            "page": 89,
+            "text": "Площадь 431,61 м2",
+            "origin": "native",
+        }
+    ]
+    tools = SimpleNamespace(sources=list(sources), preferred=[], events=[])
+    monkeypatch.setattr("audit_graph._restore_tools", lambda context, state: tools)
+    monkeypatch.setattr("audit_graph.tool_bundle", lambda tools: {"version": 1})
+    monkeypatch.setattr("audit_graph.answer_feedback", lambda *args, **kwargs: [])
+    runtime = SimpleNamespace(context=context(validation_only=False))
+    obligations = {
+        "project": [
+            {
+                "id": "project:own_quantity_inputs",
+                "domain": "quantity",
+                "subject": "Входы",
+                "required": True,
+                "policy": "blocking",
+                "state": "pending",
+            },
+        ]
+    }
+    proposals = [
+        {
+            "parameter": "quantity",
+            "operation": "direct",
+            "value": "431.61",
+            "unit": "м2",
+            "source_id": "s1",
+            "operand_source_ids": [],
+            "quote": "Площадь 431,61 м2",
+            "scope_state": "unresolved",
+            "scope_quote": "Площадь 431,61 м2",
+        }
+    ]
+    out = validate_evidence(
+        {
+            "proposals": proposals,
+            "items": [],
+            "facts": [],
+            "obligations": obligations,
+            "soft_scope_ok": True,
+            "gap_ids": ["project:own_quantity_inputs"],
+        },
+        runtime,
+    )
+    states = {o["id"]: o["state"] for o in out["obligations"]["project"]}
+    assert states["project:own_quantity_inputs"] == "confirmed"
+
+
 def test_thickness_issue_does_not_invalidate_quantity_fact(monkeypatch):
     from audit_graph import validate_evidence
 

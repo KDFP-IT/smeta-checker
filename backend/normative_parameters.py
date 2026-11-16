@@ -395,9 +395,10 @@ def build_cards(position, result, positions, relation, *, resource_proofs=None):
                         for claim in item.get('claim_ids', []))
             ]
             disputed = any(item.get('state') == 'needs_facts' for item in relevant)
+            quantity_match = kind == 'quantity' and result.get('soft_scope_ok', False)
             scope_required = location_required or p.get('scope_state') not in {None, ''}
-            if ((scope_required and p.get('scope_state') != 'verified')
-                    or disputed
+            if ((scope_required and p.get('scope_state') != 'verified' and not quantity_match)
+                    or (disputed and not quantity_match)
                     or not quoted(p['value'], p['quote'], scope)
                     or clean(scope) not in clean(source['text'])
                     or (declared_roles and (found_roles != declared_roles) and (kind == 'thickness' or found_roles)
