@@ -1017,25 +1017,37 @@ def _nearest_quantity_sum(context: GraphContext, position: dict[str, Any]) -> tu
                         str(by_id[item].get("text", "")) for item in left_cell.get("header_ids", [])
                         if item in by_id
                     )
+                    left_id, right_id = str(left_cell.get("cell_id")), str(right_cell.get("cell_id"))
                     fact = {
-                        "id": f"fact:quantity:sum:{left_cell.get('cell_id')}+{right_cell.get('cell_id')}",
+                        "id": f"fact:quantity:sum:{left_id}+{right_id}",
                         "page": page, "role": "output",
                         "unit": str(position.get("unit", "")),
                         "quote": f"{left_cell.get('text', '')} + {right_cell.get('text', '')}",
                         "value": str(total), "dimension": None, "parameter": "quantity",
-                        "source_id": f"sum:{left_cell.get('cell_id')}+{right_cell.get('cell_id')}",
+                        "source_id": f"sum:{left_id}+{right_id}",
                         "version_id": str(index.metadata.get("document_version_id", "")),
                         "scope_quote": headers, "literal_state": "verified", "subject_state": "verified",
                         "calculation_state": "not_applicable",
-                        "operand_source_ids": [str(left_cell.get("cell_id")), str(right_cell.get("cell_id"))],
+                        "operand_source_ids": [left_id, right_id],
                     }
                     source = {
                         "id": str(fact["source_id"]), "kind": "project", "page": page,
                         "text": f"{left_cell.get('text', '')} + {right_cell.get('text', '')}",
                         "label": "Подготовленный ПД (сумма строки Итог)",
-                        "origin": "calculated_from_cells",
+                        "origin": "native",
                         "version_id": str(index.metadata.get("document_version_id", "")),
+                        "operand_source_ids": [left_id, right_id],
                     }
+                    operands = []
+                    for cell in (left_cell, right_cell):
+                        operands.append({
+                            "id": str(cell.get("cell_id")), "kind": "project", "page": page,
+                            "text": str(cell.get("text", "")),
+                            "label": "Подготовленный ПД (ячейка суммы Итог)",
+                            "origin": "native",
+                            "version_id": str(index.metadata.get("document_version_id", "")),
+                        })
+                    fact["_operand_sources"] = operands
                     return fact, source
     return None
 
@@ -1235,6 +1247,9 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
     if nearest is not None:
         fact, source = nearest
         sources = [item for item in state.get("sources", []) if item.get("id") != source["id"]]
+        for operand in fact.pop("_operand_sources", []) if isinstance(fact, dict) else []:
+            if all(item.get("id") != operand.get("id") for item in sources):
+                sources.append(operand)
         sources.insert(0, source)
         if len(sources) > 96:
             trimmed = [item for item in sources[1:] if item.get("id") != fact["source_id"]]

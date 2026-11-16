@@ -568,7 +568,7 @@ def test_sum_of_summary_row_confirms_quantity(monkeypatch):
     assert hit is not None
     fact, source = hit
     assert fact["value"] == "345.77" or fact["value"].startswith("431")
-    assert source["origin"] == "calculated_from_cells"
+    assert source["origin"] == "native"
 
 
 def test_rounded_match_keeps_sources_within_assessment_limit(monkeypatch):
