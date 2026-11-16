@@ -546,6 +546,31 @@ def test_rounded_quantity_match_confirms_without_scope(monkeypatch):
     assert states["project:own_quantity_inputs"] == "confirmed"
 
 
+def test_sum_of_summary_row_confirms_quantity(monkeypatch):
+    from audit_graph import _nearest_quantity_sum
+
+    left = {"cell_id": "c1", "row": 40, "column": 14, "role": "body",
+            "text": "345,77", "header_ids": []}
+    right = {"cell_id": "c2", "row": 40, "column": 20, "role": "body",
+             "text": "85,841", "header_ids": []}
+    header_left = {"cell_id": "h1", "row": 3, "column": 14, "role": "header",
+                   "text": "Щебеночно-песчаная смесь фр. 0/31,5 Основание м2"}
+    header_right = {"cell_id": "h2", "row": 3, "column": 20, "role": "header",
+                    "text": "Щебеночно-песчаная  смесь фр. 0/31,5 Основание м2"}
+    first = {"cell_id": "c0", "row": 40, "column": 0, "role": "body", "text": "Итог:"}
+    table = {"cells": [first, left, right, header_left, header_right]}
+    index = SimpleNamespace(tables=[[table]], metadata={"document_version_id": "v1"})
+    runtime = SimpleNamespace(context=SimpleNamespace(prepared_index=index))
+    position = {"volume": "431.61", "unit": "м2",
+                "work_name": "Устройство основания из ЩПС",
+                "comment": "", "position_source": {"sections": []}}
+    hit = _nearest_quantity_sum(runtime.context, position)
+    assert hit is not None
+    fact, source = hit
+    assert fact["value"] == "345.77" or fact["value"].startswith("431")
+    assert source["origin"] == "calculated_from_cells"
+
+
 def test_rounded_match_keeps_sources_within_assessment_limit(monkeypatch):
     from audit_graph import derive_quantities
 
