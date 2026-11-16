@@ -1110,11 +1110,12 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
     nearest = nearest_early if nearest_early is not None else _nearest_quantity_fact(runtime.context, position)
     if nearest is not None:
         fact, source = nearest
-        sources = state.setdefault("sources", [])
-        if all(item.get("id") != source["id"] for item in sources):
-            sources.insert(0, source)
+        sources = [item for item in state.get("sources", []) if item.get("id") != source["id"]]
+        sources.insert(0, source)
         if len(sources) > 96:
-            state["sources"] = sources[:96]
+            trimmed = [item for item in sources[1:] if item.get("id") != fact["source_id"]]
+            sources = [sources[0], *trimmed[:95]]
+        state["sources"] = sources
         facts = state.setdefault("facts", [])
         if all(item.get("source_id") != fact["source_id"] for item in facts):
             facts.append(fact)
