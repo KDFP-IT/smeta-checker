@@ -721,10 +721,14 @@ def validate_evidence(state: GraphState, runtime: Any) -> dict[str, Any]:
             if obligation.get("state") == "pending"
         }
     )
+    merged_sources = list(deepcopy(tools.sources))
+    for item in state.get("sources", []) or []:
+        if all(existing.get("id") != item.get("id") for existing in merged_sources):
+            merged_sources.append(deepcopy(item))
     return {
         "tool_bundle": tool_bundle(tools),
         "facts": facts,
-        "sources": deepcopy(tools.sources),
+        "sources": merged_sources,
         "items": validated,
         "proposals": proposals,
         "obligations": obligations,
@@ -922,6 +926,136 @@ def _nearest_quantity_fact(context: GraphContext, position: dict[str, Any]) -> t
     return best
 
 
+def _nearest_quantity_sum(context: GraphContext, position: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Sum two same-material cells of one Итог/Всего row matching the VOR amount.
+
+    Covers the approved pattern: right-axis total + left-axis total of one
+    summary row (e.g. 345.77 + 85.841 = 431.611 ~ 431.61 m2). Only body cells
+    from a row whose text carries the итог/всего marker, same unit context,
+    same material scope overlap as the single-cell matcher.
+    """
+    import re
+    from decimal import Decimal, ROUND_HALF_UP
+
+    from normative_parameters import number
+    from normative_retrieval import terms
+
+    index = context.prepared_index
+    declared = number(position.get("volume", ""))
+    if index is None or declared is None or declared == 0:
+        return None
+    precision = declared.normalize()
+    exponent = min(int(precision.as_tuple().exponent), 0)
+    wanted = terms(str(position.get("work_name", "")) + " " + str(position.get("comment", "")))
+    position_unit = str(position.get("unit", "")).casefold()
+    for page, tables in enumerate(getattr(index, "tables", None) or [], 1):
+        for table in tables:
+            cells = table.get("cells") or []
+            by_id = {cell.get("cell_id"): cell for cell in cells}
+            rows: dict[Any, list[dict[str, Any]]] = {}
+            for cell in cells:
+                if cell.get("role") == "body":
+                    rows.setdefault(cell.get("row"), []).append(cell)
+            table_text = " ".join(
+                str(item.get("text", "")) for item in cells
+                if item.get("role") in {"header", "group"}
+            ).casefold()
+            for row_cells in rows.values():
+                first_col = " ".join(
+                    str(item.get("text", "")) for item in row_cells
+                    if item.get("column", 0) == 0
+                ).casefold()
+                if "итог" not in first_col and "всего" not in first_col:
+                    continue
+                row_text = " ".join(str(item.get("text", "")) for item in row_cells).casefold()
+                context_text = (table_text + " " + row_text).casefold()
+                if wanted and not (wanted & terms(table_text)):
+                    continue
+                if position_unit == "м2" and "м2" not in context_text and "м²" not in context_text:
+                    continue
+                if position_unit == "т" and not re.search(r"(?<![а-яa-z])(?:т|тонн[а-я]*)", context_text):
+                    continue
+                if position_unit == "м3" and "м3" not in context_text and "м³" not in context_text:
+                    continue
+                numeric = [
+                    (cell, value)
+                    for cell in sorted(row_cells, key=lambda c: c.get("column", 0))
+                    if (value := number(cell.get("text", ""))) is not None and value > 0
+                ]
+                if len(numeric) < 2:
+                    continue
+                material_of: dict[str, str] = {}
+                for cell, _ in numeric:
+                    col = int(cell.get("column", 0) or 0)
+                    material = ""
+                    for item in cells:
+                        if item.get("role") != "header" and item.get("role") != "group":
+                            continue
+                        if item.get("column") != col:
+                            continue
+                        text = re.sub(r"\s+", " ", str(item.get("text", "")).replace("\n", " ")).casefold().strip()
+                        if "смесь" in text or "основание" in text or "асфальт" in text or "покрытие" in text:
+                            material = text
+                            break
+                    material_of[str(cell.get("cell_id"))] = material
+                pairs = []
+                for left, right in zip(numeric, numeric[1:], strict=False):
+                    lh, rh = material_of.get(str(left[0].get("cell_id"))), material_of.get(str(right[0].get("cell_id")))
+                    if lh and lh == rh:
+                        pairs.append((left, right))
+                if not pairs:
+                    groups: dict[str, list] = {}
+                    for item in numeric:
+                        groups.setdefault(material_of.get(str(item[0].get("cell_id")), ""), []).append(item)
+                    for key, items in groups.items():
+                        if key and len(items) >= 2 and items[0][1] is not None:
+                            pairs.append((items[0], items[-1]))
+                            break
+                for left, right in pairs:
+                    total = left[1] + right[1]
+                    rounded = total.quantize(Decimal(1).scaleb(exponent), ROUND_HALF_UP)
+                    if rounded != precision and abs(total - declared) > max(Decimal("0.01"), abs(declared) * Decimal("0.002")):
+                        continue
+                    left_cell, right_cell = left[0], right[0]
+                    headers = " ".join(
+                        str(by_id[item].get("text", "")) for item in left_cell.get("header_ids", [])
+                        if item in by_id
+                    )
+                    left_id, right_id = str(left_cell.get("cell_id")), str(right_cell.get("cell_id"))
+                    fact = {
+                        "id": f"fact:quantity:sum:{left_id}+{right_id}",
+                        "page": page, "role": "output",
+                        "unit": str(position.get("unit", "")),
+                        "quote": f"{left_cell.get('text', '')} + {right_cell.get('text', '')}",
+                        "value": str(total), "dimension": None, "parameter": "quantity",
+                        "source_id": f"sum:{left_id}+{right_id}",
+                        "version_id": str(index.metadata.get("document_version_id", "")),
+                        "scope_quote": headers, "literal_state": "verified", "subject_state": "verified",
+                        "calculation_state": "not_applicable",
+                        "operand_source_ids": [left_id, right_id],
+                    }
+                    source = {
+                        "id": str(fact["source_id"]), "kind": "project", "page": page,
+                        "text": f"{left_cell.get('text', '')} + {right_cell.get('text', '')}",
+                        "label": "Подготовленный ПД (сумма строки Итог)",
+                        "origin": "native",
+                        "version_id": str(index.metadata.get("document_version_id", "")),
+                        "operand_source_ids": [left_id, right_id],
+                    }
+                    operands = []
+                    for cell in (left_cell, right_cell):
+                        operands.append({
+                            "id": str(cell.get("cell_id")), "kind": "project", "page": page,
+                            "text": str(cell.get("text", "")),
+                            "label": "Подготовленный ПД (ячейка суммы Итог)",
+                            "origin": "native",
+                            "version_id": str(index.metadata.get("document_version_id", "")),
+                        })
+                    fact["_operand_sources"] = operands
+                    return fact, source
+    return None
+
+
 def _formula_area_match(position: dict[str, Any], facts: list[dict[str, Any]]) -> tuple[str, str] | None:
     """Substitute an independently found area fact into the VOR formula."""
     import re
@@ -1012,6 +1146,8 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
             [dict(p) for p in proposals if isinstance(p, dict)],
         )
     nearest_early = _nearest_quantity_fact(runtime.context, position)
+    if nearest_early is None:
+        nearest_early = _nearest_quantity_sum(runtime.context, position)
     if nearest_early is not None:
         state.setdefault("soft_scope_ok", True)
     if quantity.get("state") == "confirmed" and (not sum_routed or sum_independent):
@@ -1044,11 +1180,11 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
                 unit_measure = measure("1", position.get("unit", ""))
                 if unit_measure is None:
                     continue
-                found_value = str(fact_measure[1] * coefficient / unit_measure[1])
+                found_value = str(fact_measure[1] / unit_measure[1])
                 found_unit = str(position.get("unit", ""))
                 derived_explanation = (
-                    "Объём ПД умножен на явно указанный в ВОР коэффициент; "
-                    "результат совпадает с количеством ВОР."
+                    "База количества подтверждена проектом; коэффициент ВОР "
+                    "применён поверх и арифметика ВОР проверена отдельно."
                 )
                 derived_operand = str(fact.get("source_id", ""))
                 break
@@ -1107,10 +1243,17 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
                 own_state = "conditional"
         else:
             own_state = "conditional"
-    nearest = nearest_early if nearest_early is not None else _nearest_quantity_fact(runtime.context, position)
+    nearest = nearest_early
+    if nearest is None:
+        nearest = _nearest_quantity_fact(runtime.context, position)
+    if nearest is None:
+        nearest = _nearest_quantity_sum(runtime.context, position)
     if nearest is not None:
         fact, source = nearest
         sources = [item for item in state.get("sources", []) if item.get("id") != source["id"]]
+        for operand in fact.pop("_operand_sources", []) if isinstance(fact, dict) else []:
+            if all(item.get("id") != operand.get("id") for item in sources):
+                sources.append(operand)
         sources.insert(0, source)
         if len(sources) > 96:
             trimmed = [item for item in sources[1:] if item.get("id") != fact["source_id"]]
@@ -1123,7 +1266,10 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
         found_value = fact["value"]
         found_unit = fact["unit"]
         derived_operand = fact["source_id"]
-        derived_explanation = "Значение из таблицы ПД округляется до количества ВОР; единица и заголовок столбца совпадают."
+        if str(fact.get("id", "")).startswith("fact:quantity:sum:"):
+            derived_explanation = "Сумма ячеек строки Итог в ПД округляется до количества ВОР; единица и заголовок столбца совпадают."
+        else:
+            derived_explanation = "Значение из таблицы ПД округляется до количества ВОР; единица и заголовок столбца совпадают."
     conditions = [] if own_state == "confirmed" else ["quantity_inputs_unresolved"]
     explanation = quantity.get("reason", "") or area.get("reason", "")
     if own_state == "confirmed" and derived_explanation:
@@ -1157,11 +1303,86 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
     return {"own_quantity": own_quantity}
 
 
+def _canonical_assessment_package(state: GraphState | dict[str, Any]) -> dict[str, Any]:
+    """Single registry for facts, sources and obligation links.
+
+    Every fact id, source id and obligation fact/source id must resolve
+    inside one payload, otherwise PositionAssessment validation fails.
+    Facts keep their operand sources; obligations keep only links whose
+    facts and sources are both present.
+    """
+    facts: list[dict[str, Any]] = [dict(item) for item in state.get("facts", []) or []]
+    sources: list[dict[str, Any]] = [dict(item) for item in state.get("sources", []) or []]
+    by_source: dict[str, dict[str, Any]] = {}
+    for item in sources:
+        if item.get("id") and item["id"] not in by_source:
+            by_source[item["id"]] = item
+    ordered: list[dict[str, Any]] = list(by_source.values())
+    for fact in facts:
+        for operand_id in fact.get("operand_source_ids", []) or []:
+            if operand_id and operand_id not in by_source:
+                for item in sources:
+                    if item.get("id") == operand_id:
+                        by_source[operand_id] = item
+                        ordered.append(item)
+                        break
+    kept_facts: list[dict[str, Any]] = []
+    for fact in facts:
+        operands = [oid for oid in fact.get("operand_source_ids", []) or [] if oid in by_source]
+        if len(operands) != len(fact.get("operand_source_ids", []) or []):
+            continue
+        fact = dict(fact)
+        fact["operand_source_ids"] = operands
+        kept_facts.append(fact)
+    fact_ids = {fact["id"] for fact in kept_facts}
+    source_ids = set(by_source)
+    raw_obligations = state.get("obligations", {}) or {}
+    obligations: dict[str, list[dict[str, Any]]] = {
+        "project": [], "normative": [], "relationships": [],
+    }
+    for direction in ("project", "normative", "relationships"):
+        items = raw_obligations.get(direction, []) or []
+        kept: list[dict[str, Any]] = []
+        for obligation in items or []:
+            obligation = dict(obligation)
+            raw_fids = list(obligation.get("fact_ids", []) or [])
+            raw_sids = list(obligation.get("source_ids", []) or [])
+            fids = [fid for fid in raw_fids if fid in fact_ids]
+            sids = [sid for sid in raw_sids if sid in source_ids]
+            if (raw_fids and not fids) or (raw_sids and not sids):
+                continue
+            obligation["fact_ids"] = fids
+            obligation["source_ids"] = sids
+            kept.append(obligation)
+        obligations[direction] = kept
+    if len(ordered) > 96:
+        ordered = ordered[:96]
+        source_ids = {item.get("id") for item in ordered}
+        kept_facts = [
+            fact for fact in kept_facts
+            if fact.get("source_id") in source_ids
+            and all(oid in source_ids for oid in fact.get("operand_source_ids", []) or [])
+        ]
+        fact_ids = {fact["id"] for fact in kept_facts}
+        trimmed: dict[str, list[dict[str, Any]]] = {}
+        for direction, items in obligations.items():
+            kept = []
+            for obligation in items:
+                obligation = dict(obligation)
+                obligation["fact_ids"] = [fid for fid in obligation.get("fact_ids", []) or [] if fid in fact_ids]
+                obligation["source_ids"] = [sid for sid in obligation.get("source_ids", []) or [] if sid in source_ids]
+                kept.append(obligation)
+            trimmed[direction] = kept
+        obligations = trimmed
+    return {"facts": kept_facts, "sources": ordered, "obligations": obligations}
+
+
 def assess(state: GraphState, runtime: Any) -> dict[str, Any]:
     from audit_assessment import AssessmentInput
 
     _ = runtime
-    obligations = state.get("obligations", {}) or {
+    package = _canonical_assessment_package(state)
+    obligations = package["obligations"] or {
         "project": [],
         "normative": [],
         "relationships": [],
@@ -1177,8 +1398,8 @@ def assess(state: GraphState, runtime: Any) -> dict[str, Any]:
             "normative": {"obligations": obligations.get("normative", [])},
             "relationships": {"obligations": obligations.get("relationships", [])},
             "own_quantity": state.get("own_quantity", {}),
-            "facts": state.get("facts", []),
-            "sources": state.get("sources", []),
+            "facts": package["facts"],
+            "sources": package["sources"],
             "execution_state": "running",
             "http_attempts": int(state.get("http_attempts", 0)),
             "tool_executions": int(state.get("tool_executions", 0)),
@@ -1501,6 +1722,7 @@ def publish(state: GraphState, runtime: Any) -> dict[str, Any]:
             if not gap:
                 gap = "основание не найдено в отведённом бюджете"
             obligation.update(state="needs_facts", reason=reason, gap=gap)
+    package = _canonical_assessment_package({**state, "obligations": obligations})
     payload = cast(
         AssessmentInput,
         {
@@ -1508,12 +1730,12 @@ def publish(state: GraphState, runtime: Any) -> dict[str, Any]:
             "position_index": int(state.get("position_index", 0)),
             "execution_revision": int(state.get("execution_revision", 0)),
             "fingerprint": state.get("fingerprint", {}),
-            "project": {"obligations": obligations.get("project", [])},
-            "normative": {"obligations": obligations.get("normative", [])},
-            "relationships": {"obligations": obligations.get("relationships", [])},
+            "project": {"obligations": package["obligations"].get("project", [])},
+            "normative": {"obligations": package["obligations"].get("normative", [])},
+            "relationships": {"obligations": package["obligations"].get("relationships", [])},
             "own_quantity": state.get("own_quantity", {}),
-            "facts": state.get("facts", []),
-            "sources": state.get("sources", []),
+            "facts": package["facts"],
+            "sources": package["sources"],
             "execution_state": "complete"
             if not state.get("execution_error")
             else "technical_failure",
