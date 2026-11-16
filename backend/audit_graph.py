@@ -1349,7 +1349,7 @@ def _canonical_assessment_package(state: GraphState | dict[str, Any]) -> dict[st
             raw_sids = list(obligation.get("source_ids", []) or [])
             fids = [fid for fid in raw_fids if fid in fact_ids]
             sids = [sid for sid in raw_sids if sid in source_ids]
-            if (raw_fids or raw_sids) and not (fids or sids):
+            if (raw_fids and not fids) or (raw_sids and not sids):
                 continue
             obligation["fact_ids"] = fids
             obligation["source_ids"] = sids
