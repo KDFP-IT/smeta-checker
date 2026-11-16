@@ -1303,11 +1303,86 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
     return {"own_quantity": own_quantity}
 
 
+def _canonical_assessment_package(state: GraphState | dict[str, Any]) -> dict[str, Any]:
+    """Single registry for facts, sources and obligation links.
+
+    Every fact id, source id and obligation fact/source id must resolve
+    inside one payload, otherwise PositionAssessment validation fails.
+    Facts keep their operand sources; obligations keep only links whose
+    facts and sources are both present.
+    """
+    facts: list[dict[str, Any]] = [dict(item) for item in state.get("facts", []) or []]
+    sources: list[dict[str, Any]] = [dict(item) for item in state.get("sources", []) or []]
+    by_source: dict[str, dict[str, Any]] = {}
+    for item in sources:
+        if item.get("id") and item["id"] not in by_source:
+            by_source[item["id"]] = item
+    ordered: list[dict[str, Any]] = list(by_source.values())
+    for fact in facts:
+        for operand_id in fact.get("operand_source_ids", []) or []:
+            if operand_id and operand_id not in by_source:
+                for item in sources:
+                    if item.get("id") == operand_id:
+                        by_source[operand_id] = item
+                        ordered.append(item)
+                        break
+    kept_facts: list[dict[str, Any]] = []
+    for fact in facts:
+        operands = [oid for oid in fact.get("operand_source_ids", []) or [] if oid in by_source]
+        if len(operands) != len(fact.get("operand_source_ids", []) or []):
+            continue
+        fact = dict(fact)
+        fact["operand_source_ids"] = operands
+        kept_facts.append(fact)
+    fact_ids = {fact["id"] for fact in kept_facts}
+    source_ids = set(by_source)
+    raw_obligations = state.get("obligations", {}) or {}
+    obligations: dict[str, list[dict[str, Any]]] = {
+        "project": [], "normative": [], "relationships": [],
+    }
+    for direction in ("project", "normative", "relationships"):
+        items = raw_obligations.get(direction, []) or []
+        kept: list[dict[str, Any]] = []
+        for obligation in items or []:
+            obligation = dict(obligation)
+            raw_fids = list(obligation.get("fact_ids", []) or [])
+            raw_sids = list(obligation.get("source_ids", []) or [])
+            fids = [fid for fid in raw_fids if fid in fact_ids]
+            sids = [sid for sid in raw_sids if sid in source_ids]
+            if (raw_fids or raw_sids) and not (fids or sids):
+                continue
+            obligation["fact_ids"] = fids
+            obligation["source_ids"] = sids
+            kept.append(obligation)
+        obligations[direction] = kept
+    if len(ordered) > 96:
+        ordered = ordered[:96]
+        source_ids = {item.get("id") for item in ordered}
+        kept_facts = [
+            fact for fact in kept_facts
+            if fact.get("source_id") in source_ids
+            and all(oid in source_ids for oid in fact.get("operand_source_ids", []) or [])
+        ]
+        fact_ids = {fact["id"] for fact in kept_facts}
+        trimmed: dict[str, list[dict[str, Any]]] = {}
+        for direction, items in obligations.items():
+            kept = []
+            for obligation in items:
+                obligation = dict(obligation)
+                obligation["fact_ids"] = [fid for fid in obligation.get("fact_ids", []) or [] if fid in fact_ids]
+                obligation["source_ids"] = [sid for sid in obligation.get("source_ids", []) or [] if sid in source_ids]
+                kept.append(obligation)
+            trimmed[direction] = kept
+        obligations = trimmed
+    return {"facts": kept_facts, "sources": ordered, "obligations": obligations}
+
+
 def assess(state: GraphState, runtime: Any) -> dict[str, Any]:
     from audit_assessment import AssessmentInput
 
     _ = runtime
-    obligations = state.get("obligations", {}) or {
+    package = _canonical_assessment_package(state)
+    obligations = package["obligations"] or {
         "project": [],
         "normative": [],
         "relationships": [],
@@ -1323,8 +1398,8 @@ def assess(state: GraphState, runtime: Any) -> dict[str, Any]:
             "normative": {"obligations": obligations.get("normative", [])},
             "relationships": {"obligations": obligations.get("relationships", [])},
             "own_quantity": state.get("own_quantity", {}),
-            "facts": state.get("facts", []),
-            "sources": state.get("sources", []),
+            "facts": package["facts"],
+            "sources": package["sources"],
             "execution_state": "running",
             "http_attempts": int(state.get("http_attempts", 0)),
             "tool_executions": int(state.get("tool_executions", 0)),
@@ -1647,6 +1722,7 @@ def publish(state: GraphState, runtime: Any) -> dict[str, Any]:
             if not gap:
                 gap = "основание не найдено в отведённом бюджете"
             obligation.update(state="needs_facts", reason=reason, gap=gap)
+    package = _canonical_assessment_package({**state, "obligations": obligations})
     payload = cast(
         AssessmentInput,
         {
@@ -1654,12 +1730,12 @@ def publish(state: GraphState, runtime: Any) -> dict[str, Any]:
             "position_index": int(state.get("position_index", 0)),
             "execution_revision": int(state.get("execution_revision", 0)),
             "fingerprint": state.get("fingerprint", {}),
-            "project": {"obligations": obligations.get("project", [])},
-            "normative": {"obligations": obligations.get("normative", [])},
-            "relationships": {"obligations": obligations.get("relationships", [])},
+            "project": {"obligations": package["obligations"].get("project", [])},
+            "normative": {"obligations": package["obligations"].get("normative", [])},
+            "relationships": {"obligations": package["obligations"].get("relationships", [])},
             "own_quantity": state.get("own_quantity", {}),
-            "facts": state.get("facts", []),
-            "sources": state.get("sources", []),
+            "facts": package["facts"],
+            "sources": package["sources"],
             "execution_state": "complete"
             if not state.get("execution_error")
             else "technical_failure",
