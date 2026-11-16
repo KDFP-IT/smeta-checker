@@ -721,10 +721,14 @@ def validate_evidence(state: GraphState, runtime: Any) -> dict[str, Any]:
             if obligation.get("state") == "pending"
         }
     )
+    merged_sources = list(deepcopy(tools.sources))
+    for item in state.get("sources", []) or []:
+        if all(existing.get("id") != item.get("id") for existing in merged_sources):
+            merged_sources.append(deepcopy(item))
     return {
         "tool_bundle": tool_bundle(tools),
         "facts": facts,
-        "sources": deepcopy(tools.sources),
+        "sources": merged_sources,
         "items": validated,
         "proposals": proposals,
         "obligations": obligations,
