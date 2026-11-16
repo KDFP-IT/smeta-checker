@@ -71,3 +71,11 @@ def test_pinned_decart_model_is_passed_verbatim_without_duplicate_provider_routi
     assert kwargs['model']==credentials.model_name
     assert kwargs['extra_body']=={'reasoning':{'effort':'none'}}
     assert 'provider' not in kwargs
+
+
+def test_default_deepseek_uses_cheap_provider_fallback():
+    client, credentials, stats, create = invoke('{"interpretation":"check","queries":["test"]}')
+    _ask(client, credentials, '', {}, Plan, Trace(), 'normative-evidence-1', stats)
+    provider = create.call_args.kwargs['extra_body']['provider']
+    assert provider['order'] == ['sail', 'deepinfra', 'river']
+    assert provider['allow_fallbacks'] is True
