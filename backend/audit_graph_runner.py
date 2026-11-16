@@ -197,6 +197,16 @@ def run_graph_position(*, context: Any, run_id: UUID, position_index: int,
             except Exception:
                 pass
         assessment = result.get("assessment") or {}
+        try:
+            execution_state = str((assessment.get("execution") or {}).get("state", ""))
+            if execution_state == "technical_failure":
+                trace_status = "Технический сбой"
+            else:
+                trace_status = str((assessment.get("project") or {}).get("state", "needs_facts"))
+            trace.finish({"status": trace_status})
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Phoenix trace finish failed", exc_info=True)
         published = publish_assessment(
             repository=context.repository, run_id=run_id, position_index=position_index,
             assessment=assessment, task_id=task_id, token=token,
