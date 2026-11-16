@@ -546,6 +546,28 @@ def test_rounded_quantity_match_confirms_without_scope(monkeypatch):
     assert states["project:own_quantity_inputs"] == "confirmed"
 
 
+def test_rounded_match_keeps_sources_within_assessment_limit(monkeypatch):
+    from audit_graph import derive_quantities
+
+    matched = (
+        {"id": "fact:quantity:c1", "page": 1, "role": "output", "unit": "м2",
+         "quote": "10", "value": "10", "parameter": "quantity", "source_id": "c1",
+         "version_id": "v1", "scope_quote": "", "literal_state": "verified",
+         "subject_state": "verified", "calculation_state": "not_applicable",
+         "operand_source_ids": []},
+        {"id": "c1", "kind": "project", "page": 1, "text": "10",
+         "label": "x", "origin": "native", "version_id": "v1"},
+    )
+    sources = [{"id": f"s{i}", "kind": "project"} for i in range(100)]
+    monkeypatch.setattr("audit_graph._nearest_quantity_fact", lambda context, pos: matched)
+    runtime = SimpleNamespace(context=SimpleNamespace(prepared_index=object(), position={}))
+    state = {"proposals": [], "sources": sources, "quantity_kind": "direct"}
+    out = derive_quantities(state, runtime)
+    assert out["own_quantity"]["state"] == "confirmed"
+    assert len(state["sources"]) <= 96
+    assert state["sources"][0]["id"] == "c1"
+
+
 def test_thickness_issue_does_not_invalidate_quantity_fact(monkeypatch):
     from audit_graph import validate_evidence
 
