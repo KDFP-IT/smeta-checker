@@ -99,6 +99,7 @@ class GraphState(TypedDict, total=False):
     own_quantity: dict[str, Any]
     assessment: dict[str, Any]
     progress_made: bool
+    soft_scope_ok: bool
 
 
 @dataclass
@@ -1010,6 +1011,9 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
             str(position.get("unit", "")),
             [dict(p) for p in proposals if isinstance(p, dict)],
         )
+    nearest_early = _nearest_quantity_fact(runtime.context, position)
+    if nearest_early is not None:
+        state.setdefault("soft_scope_ok", True)
     if quantity.get("state") == "confirmed" and (not sum_routed or sum_independent):
         own_state = "confirmed"
     elif sum_routed and not sum_independent and quantity.get("state") == "confirmed":
@@ -1103,7 +1107,7 @@ def derive_quantities(state: GraphState, runtime: Any) -> dict[str, Any]:
                 own_state = "conditional"
         else:
             own_state = "conditional"
-    nearest = _nearest_quantity_fact(runtime.context, position)
+    nearest = nearest_early if nearest_early is not None else _nearest_quantity_fact(runtime.context, position)
     if nearest is not None:
         fact, source = nearest
         sources = state.setdefault("sources", [])
